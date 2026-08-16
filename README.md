@@ -143,7 +143,30 @@ Reports the *last run*, not the current source. A file edited since is not repre
 
 ### `dream_preview`
 
-Renders a `.dsm` and returns the picture. See [Preview](#preview) below.
+Renders a `.dsm` and returns the picture.
+
+Goes over the editor's preview WebSocket rather than the request-file transport. Both reach
+the same renderer, but the file path returns the render context's **first** frame, which is
+the engine's default material and not yours: a pure-red material came back as a grey
+WorldGridMaterial sphere, and red and blue came back byte-identical. Over the socket they
+come back red and blue.
+
+> [!NOTE]
+> **Two findings from chasing that, both worth keeping.**
+>
+> A plugin-side fix landed in `FDreamShaderPreviewRenderContext::RenderCurrentFrame`:
+> assigning a material to the preview component only marks its render state dirty, and the
+> proxy that carries the material is rebuilt during the world's end-of-frame updates. Without
+> forcing those, the draw uses the previous proxy — on a fresh context, the engine default.
+> Before: streaming frames 0 and 1 were the grey fallback and frame 2 was the material.
+> After: frame 0 is the material. That also removes the grey flash from the VSCode panel.
+>
+> **The request-file path is still wrong after that fix, and it is not understood.** It runs
+> the same `RenderMaterialPreview` → `SaveMaterialPreviewFrame` → `RenderCurrentFrame` chain
+> that the socket path runs, with the same material and mesh, and still returns the fallback
+> — two consecutive calls on an already-rendered material both return it. The only difference
+> found so far is which ticker the call arrives on. Anything using that transport for a
+> preview should expect the wrong picture until this is resolved.
 
 ## Four matching rules, and they are not the same
 

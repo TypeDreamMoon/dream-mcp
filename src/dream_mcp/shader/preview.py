@@ -8,12 +8,13 @@ and saying so plainly beats a fallback that returns something worthless.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..core import transport
 from ..core.liveness import shader_bridge_dir
 from ..core.locate import Project
+from . import preview_ws
 
 #: Compared case-insensitively by the editor; anything else silently becomes `sphere`.
 #: Validated here instead so a typo is a message rather than a surprising picture.
@@ -42,6 +43,7 @@ def render(project: Project,
            width: int = 512,
            height: int = 512,
            timeout: float = 180.0) -> Preview:
+    started = time.monotonic()
     if source_file.suffix.lower() != ".dsm":
         raise PreviewFailed(
             f"Only a .dsm renders a preview; '{source_file.name}' is not one. A .dsf is a "
@@ -62,23 +64,18 @@ def render(project: Project,
                 f"silently, so the picture would not be the size you asked for."
             )
 
-    reply = transport.send(
-        project, "previewMaterial", lang="shader", timeout=timeout,
-        sourceFile=str(source_file).replace("\\", "/"),
-        mesh=wanted, width=width, height=height,
-    )
-
-    result = _read_preview_json(project, reply.request_id)
-
-    if not reply.ok:
-        raise PreviewFailed(reply.message or result.get("message", "The preview failed."))
-
-    image = Path(result.get("imagePath", ""))
-    if not image.is_file():
-        raise PreviewFailed(
-            f"The editor reported success but no image is at '{image}'. "
-            f"preview.json said: {result.get('message', '(nothing)')}"
+    # Over the socket, not the request file. The file transport reaches the same renderer
+    # but returns its first frame, which is the engine's default material and not yours --
+    # see preview_ws for the measurement. This also keeps `preview.json` out of it.
+    try:
+        result, png = preview_ws.render(
+            str(source_file).replace("\\", "/"),
+            mesh=wanted, width=width, height=height, timeout=timeout,
         )
+    except preview_ws.PreviewSocketError as error:
+        raise PreviewFailed(str(error)) from error
+
+    image = _cache_frame(project, source_file, png)
 
     notes: list[str] = []
     resolved = str(result.get("mesh", wanted)).lower()
@@ -91,10 +88,24 @@ def render(project: Project,
         image=image,
         asset_path=str(result.get("assetPath", "")),
         mesh=resolved,
-        message=str(result.get("message", reply.message)),
-        duration_ms=reply.duration_ms,
+        message=str(result.get("message", "")),
+        duration_ms=int((time.monotonic() - started) * 1000),
         notes=notes,
     )
+
+
+def _cache_frame(project: Project, source_file: Path, png: bytes) -> Path:
+    """Put the bytes somewhere the MCP layer can hand back as an image.
+
+    Named after the source and written under the bridge's own Preview directory, so it sits
+    with the plugin's own renders and gets cleaned up the same way. One file per source, as
+    the plugin does -- a preview is a current view, not a history.
+    """
+    directory = shader_bridge_dir(project) / "Preview"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{source_file.stem}-mcp.png"
+    path.write_bytes(png)
+    return path
 
 
 #: Blend modes whose output is a *contribution* to what is behind them rather than a
@@ -114,11 +125,15 @@ _SETTING = r'{key}\s*=\s*"([^"]+)"'
 def _legibility_notes(source_file: Path) -> list[str]:
     """Say when a dark or empty-looking picture is the correct answer.
 
-    Learned the hard way: an Additive Unlit portal rendered as what looked like a bare
-    checkerboard, and the honest reading of that image without this note is "the renderer is
-    broken". It was not -- measured against the background, the geometry was there and the
-    material was simply contributing almost nothing at rest. A preview that can be
-    legitimately empty has to say so, or it costs someone the same hour it cost here.
+    Written after an Additive Unlit portal rendered as what looked like a bare checkerboard,
+    to say that such a picture can be correct.
+
+    **It was not correct in that case.** 2026-08-16: the same material over the streaming
+    path shows a bright glow by frame 2, and the empty picture was the one-shot path
+    capturing frame 0 before the material was bound (see the README's known-broken note).
+    The note below is true in general and wrong about that instance -- which is exactly how
+    a plausible explanation suppresses a real bug. Keep it, because an additive material
+    genuinely can look like nothing; but never read it as evidence that nothing is wrong.
     """
     # Reads the first match in the whole file rather than scoping to a block, which is safe
     # because a valid .dsm declares exactly one Shader -- two is a parse error, and the only

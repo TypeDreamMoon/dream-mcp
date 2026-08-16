@@ -11,6 +11,9 @@ dependencies = [
     # Pinned below 2 for the same reason renderdoc-mcp is: the fastmcp import
     # surface moved, and an unpinned install silently picks up the break.
     "mcp[cli]>=1.0.0,<2",
+    # dream_preview talks to the editor's preview socket directly; the request-file
+    # transport reaches the same renderer but returns the wrong frame (see README).
+    "websockets>=12",
 ]
 
 [project.scripts]
