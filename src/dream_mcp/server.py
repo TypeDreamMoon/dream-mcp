@@ -400,6 +400,12 @@ def _run(verify_only: bool, target: str, lang: str, project_dir: str | None,
         lines.append("")
         lines.append(summarize(result.diagnostics))
         lines.extend(f"  {d}" for d in result.diagnostics)
+    if result.unlocated:
+        # A run can fail entirely on one of these. Dropping them because they carry no
+        # source position leaves the caller with an exit code and no reason.
+        lines.append("")
+        lines.append("Errors with no source position:")
+        lines.extend(f"  {text}" for text in result.unlocated)
     if floor is not None:
         lines.append("")
         lines.append(assets.changed_since(project, floor).describe())

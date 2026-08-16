@@ -139,6 +139,29 @@ def read_published(project, lang: str) -> tuple[list[Diagnostic], str | None]:
     return found, data.get("updatedAtUtc")
 
 
+def unlocated_errors(output: str, limit: int = 10) -> list[str]:
+    """Error lines that carry no `(line,column)` and so become no diagnostic.
+
+    These are not rare and they are not minor. `Generated DreamShader asset '...' could not
+    be saved.` is one of them: a whole-run failure with a real cause and no source position
+    anywhere in it. Reporting only located diagnostics drops it silently, leaving a caller
+    staring at `FAILED (exit 1)` with no reason attached -- which is a worse answer than the
+    raw log would have been.
+    """
+    found: list[str] = []
+    for raw in output.splitlines():
+        stripped = raw.strip()
+        if not re.search(r"Log\w*:\s*(Error|Fatal)\s*:", stripped, re.IGNORECASE):
+            continue
+        text = _LOG_PREFIX.sub("", stripped)
+        text = re.sub(r"^Log\w*:\s*(?:Error|Fatal)\s*:\s*", "", text, flags=re.IGNORECASE)
+        if _LOCATED.match(text):
+            continue  # already reported as a proper diagnostic
+        if text and text not in found:
+            found.append(text)
+    return found[:limit]
+
+
 def summarize(diagnostics: list[Diagnostic]) -> str:
     """Three buckets, not two. Folding `info` in with the warnings inflates the count that
     a reader scans for, and DreamFX emits informational notes routinely."""

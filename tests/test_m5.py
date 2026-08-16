@@ -143,3 +143,39 @@ def test_the_report_says_it_cannot_attribute_writes(project):
     text = assets.changed_since(project, assets.floor_now()).describe()
     assert "during this run" in text
     assert "Anything else writing during the window" in text
+
+
+# -- errors with no source position ----------------------------------------------
+
+
+REAL_FAILING_RUN = """dsc: compile  project=DevTest.uproject  engine=F:/UnrealEngine/UE_Moon
+LogDreamShader: Error: I:/x/MF_ToonSeeThroughOverlay.dsf: Generated DreamShader asset \
+'/MoonToon/MaterialFunctions/Shared/MF_ToonSeeThroughOverlay.MF_ToonSeeThroughOverlay' \
+could not be saved.
+
+dsc: FAILED (exit 1)
+"""
+
+
+def test_a_failure_with_no_line_number_is_still_reported():
+    """Captured from a real run on 2026-08-16. It produces zero located diagnostics, so
+    reporting only those left the caller with `FAILED (exit 1)` and no reason at all -- the
+    single worst answer available, because the log had the reason in it the whole time.
+    """
+    from dream_mcp.core.diagnostics import from_cli, unlocated_errors
+
+    assert from_cli(REAL_FAILING_RUN) == []
+
+    recovered = unlocated_errors(REAL_FAILING_RUN)
+    assert len(recovered) == 1
+    assert "could not be saved" in recovered[0]
+
+
+def test_located_errors_are_not_repeated_as_unlocated():
+    """They are already reported as proper diagnostics; printing them twice trains the
+    reader to skip the section that exists for the ones that appear only there."""
+    from dream_mcp.core.diagnostics import from_cli, unlocated_errors
+
+    located = "LogDreamShader: Error: C:/x/M.dsm(22,9): Unknown Graph function 'saturte'.\n"
+    assert len(from_cli(located)) == 1
+    assert unlocated_errors(located) == []

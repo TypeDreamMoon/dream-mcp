@@ -14,7 +14,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .diagnostics import Diagnostic, from_cli
+from .diagnostics import Diagnostic, from_cli, unlocated_errors
 from .locate import Project
 
 
@@ -29,6 +29,9 @@ class CliResult:
     message: str
     output: str
     diagnostics: list[Diagnostic] = field(default_factory=list)
+    unlocated: list[str] = field(default_factory=list)
+    """Error lines with no source position. Never drop these -- a run can fail entirely on
+    one of them, and reporting the exit code alone says nothing about why."""
 
 
 def _pwsh() -> str:
@@ -48,10 +51,17 @@ def driver_path(project: Project, lang: str) -> Path:
     return path
 
 
+#: A cold run is engine boot (~12 s for DreamFX, ~24 s for DreamShader on this project) plus
+#: the work. Five minutes is generous for a single file and short enough that a hang fails
+#: while someone is still watching. It was 1800 s, which is not a timeout -- it is half an
+#: hour of a silent tool call, and the caller cannot tell that from a crash.
+DEFAULT_TIMEOUT_SECONDS = 300.0
+
+
 def run(project: Project, lang: str, command: str,
         target: str | None = None,
         flags: list[str] | None = None,
-        timeout: float = 1800.0) -> CliResult:
+        timeout: float = DEFAULT_TIMEOUT_SECONDS) -> CliResult:
     """Invoke a driver and normalise its result.
 
     Exit codes differ between the two and both are meaningful: `dfx.ps1` returns the error
@@ -70,17 +80,23 @@ def run(project: Project, lang: str, command: str,
             timeout=timeout, encoding="utf-8", errors="replace",
         )
     except subprocess.TimeoutExpired:
-        return CliResult(False, -1, f"The driver did not finish within {timeout:.0f}s.", "")
+        return CliResult(
+            False, -1,
+            f"The cold path did not finish within {timeout:.0f}s and was killed. "
+            f"Open the project in the editor and retry -- through the bridge the same work "
+            f"is milliseconds, because it skips the engine boot entirely. If the build "
+            f"genuinely needs longer than this, pass a larger timeout.",
+            "")
 
     output = (completed.stdout or "") + (completed.stderr or "")
-    diagnostics = from_cli(output)
 
     return CliResult(
         ok=completed.returncode == 0,
         exit_code=completed.returncode,
         message=_last_status_line(output) or f"exit {completed.returncode}",
         output=output,
-        diagnostics=diagnostics,
+        diagnostics=from_cli(output),
+        unlocated=unlocated_errors(output),
     )
 
 
