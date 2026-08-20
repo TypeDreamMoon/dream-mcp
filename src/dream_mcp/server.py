@@ -19,7 +19,8 @@ from .core import assets, cli, liveness as live, routing, transport
 from .core.diagnostics import read_published, summarize
 from .core.locate import LocateError, Project, resolve
 from .fx import index as fx_index
-from .shader import manifests as shader_manifests, preview as shader_preview
+from .shader import (manifests as shader_manifests, outcomes as shader_outcomes,
+                     preview as shader_preview)
 
 mcp = FastMCP("dream")
 
@@ -69,6 +70,14 @@ def dream_status(project_dir: str | None = None) -> str:
 
     sh = live.read_shader_status(project)
     lines.append(f"DreamShader bridge:  {sh.liveness.value.upper()} -- {sh.detail}")
+    if sh.pid:
+        lines.append(f"  pid {sh.pid}, protocol {sh.protocol}, plugin {sh.plugin_version}")
+    if sh.heartbeat_age_seconds is not None:
+        lines.append(f"  heartbeat {sh.heartbeat_age_seconds:.1f}s ago")
+    if sh.owner_pid is not None:
+        lines.append(
+            f"  bridge owner: pid {sh.owner_pid} -- one editor per project serves requests "
+            f"and writes generated assets; any other editor open on it does neither")
     for warning in sh.warnings:
         lines.append(f"  ! {warning}")
 
@@ -325,9 +334,13 @@ def _run(verify_only: bool, target: str, lang: str, project_dir: str | None,
     if decision.route is routing.Route.REFUSE:
         return _report(header, decision, [decision.reason])
 
-    # Taken before anything runs. Verify writes nothing, so asking there would spend two
-    # seconds proving it.
-    floor = assets.floor_now() if (report_writes and not verify_only) else None
+    # Taken before anything runs, so the walk happens once. A DreamFX verify genuinely
+    # writes nothing, and asking there would spend two seconds proving it -- but a
+    # DreamShader "verify" is a real compile (the plugin has no write-free mode), and a
+    # real compile saves any asset that already exists on disk. There, the scan is the
+    # only thing that can tell the caller what it actually cost them.
+    wants_floor = report_writes and (not verify_only or resolved == "shader")
+    floor = assets.floor_now() if wants_floor else None
 
     if decision.route is routing.Route.BRIDGE:
         try:
@@ -363,9 +376,14 @@ def _run(verify_only: bool, target: str, lang: str, project_dir: str | None,
                     "older than the M3 bridge, which sends no reply, so completion was read "
                     "off the diagnostics timestamp. Rebuild the plugin.")
             if resolved == "shader":
-                lines.append(
-                    "The editor generates in memory: no .uasset was written. Use the CLI "
-                    "path (close the editor) when you need assets on disk.")
+                outcome = shader_outcomes.classify(reply.message)
+                if outcome is not None:
+                    lines.append("")
+                    lines.append(f"REFUSED ({outcome.kind}) -- this is not a source error.")
+                    lines.append(outcome.summary)
+                    lines.append(f"What to do: {outcome.action}")
+                elif reply.ok:
+                    lines.append(shader_outcomes.persistence_note(reply.message))
             if path is None and resolved == "fx":
                 lines.append(
                     "A whole-tree request is QUEUED, not completed -- the editor drains it "
@@ -386,9 +404,12 @@ def _run(verify_only: bool, target: str, lang: str, project_dir: str | None,
     else:
         if verify_only:
             return _report(header, decision, [
-                "DreamShader has no write-free compile in the commandlet, so there is no "
-                "way to verify a .dsm without writing assets while the editor is closed. "
-                "Open the editor and re-run: the in-editor path generates in memory."])
+                "DreamShader has no write-free compile, in the commandlet or anywhere "
+                "else, so there is no way to check a .dsm without compiling it for real. "
+                "Opening the editor does not make this write-free either: an asset that "
+                "already exists on disk is rebuilt and SAVED through the editor too. Use "
+                "dream_build with report_writes=true if writing is acceptable, or read "
+                "dream_diagnostics for the standing findings if it is not."])
         command, flags = "compile", ["-Force"]
 
     result = cli.run(project, resolved, command,
@@ -434,14 +455,21 @@ def dream_build(target: str, lang: str = "auto", project_dir: str | None = None,
 
 
 @mcp.tool()
-def dream_verify(target: str, lang: str = "auto", project_dir: str | None = None) -> str:
-    """Check a source against its generated asset without writing anything.
+def dream_verify(target: str, lang: str = "auto", project_dir: str | None = None,
+                 report_writes: bool = False) -> str:
+    """Check a source against its generated asset. Writes nothing for DreamFX.
 
     This is the drift gate: it catches the case nobody notices, where someone edited a
     source, did not rebuild, and committed both. A build alone passes, because a build fixes
     it. Same routing as dream_build.
+
+    NOT write-free for DreamShader, and there is no way to make it so: the plugin has no
+    check-without-compiling mode, so this compiles for real, and a real compile SAVES any
+    asset that already exists on disk. Memory-only assets stay memory-only. Pass
+    report_writes=true to be told which .uasset files that actually touched -- it costs a
+    ~2 s walk, and it is the only thing that can answer it.
     """
-    return _run(True, target, lang, project_dir)
+    return _run(True, target, lang, project_dir, report_writes)
 
 
 # ---------------------------------------------------------------- diagnostics

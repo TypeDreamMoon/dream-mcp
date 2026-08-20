@@ -68,8 +68,16 @@ are load-bearing and all three are implemented here:
   window to wait out.
 - A crash leaves the file behind. The recorded pid is what closes that gap.
 
-DreamShader liveness is a **heuristic** until M3 — the plugin publishes no heartbeat, so
-`bridge.db`'s presence is all there is, and the output says so.
+DreamShader liveness is the same fact since M3: the plugin publishes and deletes its own
+`status.json` on the same contract. The old `bridge.db` heuristic is still read, but only as
+a fallback for an editor running a pre-M3 build, and results from it are marked inferred.
+
+Also reported, when the plugin is new enough to write it: **which editor owns the bridge**.
+One editor per project serves requests and writes generated assets; another editor open on
+the same project compiles its own in-memory materials and does neither. `owner.lock` is read
+separately from `status.json` rather than trusting the pid inside it, because the moment you
+want the answer is usually the moment writes are being skipped — and only the owner writes
+`status.json`, so asking it who the owner is would be circular.
 
 ### `dream_schema`
 
@@ -90,8 +98,13 @@ Ambiguous names are refused with the full candidate list rather than resolved ar
 
 ### `dream_build` / `dream_verify`
 
-Generate assets from source, or check source against the assets without writing. Both route
-the same way:
+Generate assets from source, or check source against the assets. Both route the same way:
+
+> [!WARNING]
+> **`dream_verify` is write-free for DreamFX only.** DreamShader has no check-without-
+> compiling mode anywhere — commandlet or editor — so a shader verify compiles for real, and
+> a real compile saves any asset that already exists on disk. It is a drift gate there, not a
+> dry run. Pass `report_writes=true` to be told what it touched.
 
 | Editor state | Route | Why |
 | :-- | :-- | :-- |
@@ -123,13 +136,41 @@ Three things this reports rather than smooths over:
 - **`all` through a live editor is queued, not done.** It goes through the watcher queue and
   drains across ticks, so the bridge answers "queued N". Presenting that as a result would
   be a lie.
-- **A DreamShader compile through the editor writes no `.uasset`.** The editor generates in
-  memory by design. If you need assets on disk, that is the CLI path.
+- **Where a DreamShader compile puts its output depends on the asset, not on the path.**
+  This used to read "the editor writes no `.uasset`, ever", which was true until the plugin
+  let the asset's own storage decide: an asset that already exists on disk is now rebuilt
+  **and saved** through the editor, and one that does not stays memory-only. The old wording
+  was wrong in the direction that costs — telling a caller nothing had been written when
+  something had. A material's reply says which way it went (`(virtual)` or `(saved; the
+  asset exists on disk)`) and that is what gets reported; a material function's reply does
+  not, so there `report_writes=true` is the only answer.
 - **A DreamShader result is inferred, on old plugin builds only.** Before phase M3 that
   bridge sent no reply at all, so completion had to be read off the diagnostics timestamp.
   An editor running a post-M3 build gets the real round trip; one running an older build
   still gets the inferring path, marked as such, because fire-and-forget was never *unsafe*
   there — only uninformative — and refusing it would be a regression.
+
+#### Three refusals that are not source errors
+
+DreamShader stops rather than destroying something, and the messages read exactly like
+compile errors. An agent handed one with no framing edits the `.dsm` — changing a file that
+was never wrong, to fix an asset it has not been told about. These are named, and the action
+each one wants is reported with them:
+
+| Refusal | Means | Wants |
+| :-- | :-- | :-- |
+| `diverged` | the generated asset was edited by hand since it was written | pick Revert / Adopt / Detach on the asset — **not** an edit to the source |
+| `open-in-editor` | an asset editor holds its own copy and would write it back over the rebuild | close that window and re-run |
+| `foreign-asset` | something DreamShader did not generate already occupies the target path | rename the block, or move the asset |
+
+A real source error falls through untouched, which is the property that keeps the framing
+from becoming the lie instead. `tests/test_shader_outcomes.py` quotes each message from the
+plugin, so a reword there fails a test here rather than silently dropping the framing.
+
+One refusal is deliberately **not** recognised: the write-owner deferral ("another editor
+owns this project's DreamShader bridge"). Only a non-owning editor defers that way, and a
+non-owning editor answers no bridge requests — so it can never arrive as a reply. A rule for
+it would be dead code with a passing test, which reads as coverage forever.
 
 ### `dream_diagnostics`
 

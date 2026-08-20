@@ -58,6 +58,8 @@ class BridgeStatus:
     protocol: int | None = None
     pid: int | None = None
     project: str | None = None
+    owner_pid: int | None = None
+    """Which process holds the DreamShader bridge, when a lock file names one."""
     project_dir: str | None = None
     engine_dir: str | None = None
     plugin_version: str | None = None
@@ -234,6 +236,27 @@ def read_status(project: Project, directory: Path, plugin: str,
     return status
 
 
+def _read_shader_owner(directory: Path) -> int | None:
+    """Which process currently serves this project's DreamShader bridge.
+
+    Only one editor does. The others still compile their own in-memory materials but consume
+    no requests, publish no status, and -- the part that matters here -- write no generated
+    assets to disk, which is how two editors are stopped from saving the same package.
+
+    Read separately from status.json rather than trusting the pid in it, because the whole
+    reason a caller asks is usually that a compile came back "another editor owns this
+    project's DreamShader bridge", and answering "which one" from the file that only the
+    owner writes would be circular.
+    """
+    try:
+        data = json.loads((directory / "owner.lock").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    pid = data.get("pid")
+    return pid if isinstance(pid, int) and pid > 0 else None
+
+
 def read_fx_status(project: Project) -> BridgeStatus:
     return read_status(project, fx_bridge_dir(project), "DreamFX")
 
@@ -262,7 +285,19 @@ def read_shader_status(project: Project) -> BridgeStatus:
     # plugin as a pre-M3 one, and silently downgrade every compile to the inferring path.
     data = _read_status(directory / "status.json")
     if data is not None:
-        return read_status(project, directory, "DreamShader", data)
+        status = read_status(project, directory, "DreamShader", data)
+        owner = _read_shader_owner(directory)
+        if owner is not None and status.pid is not None and owner != status.pid:
+            # Only the bridge owner publishes status.json, so these agreeing is the normal
+            # case. Disagreeing means ownership moved between the two reads -- one editor
+            # exited and another took over. Worth saying, because the same handover is what
+            # makes a compile report "another editor owns this project's bridge".
+            status.warnings.append(
+                f"owner.lock names pid {owner} but status.json names pid {status.pid}: "
+                f"bridge ownership is changing hands right now. Re-read before routing.")
+        elif owner is not None:
+            status.owner_pid = owner
+        return status
 
     if (directory / "bridge.db").exists():
         generated_at = None
