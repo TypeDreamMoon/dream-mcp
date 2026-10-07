@@ -182,6 +182,21 @@ shape here.
 
 Reports the *last run*, not the current source. A file edited since is not represented.
 
+### DreamCity
+
+A city is its `.dct`, or its package (`@dreamcity/cities/Island`); `dream_build` and
+`dream_verify` take either. DreamCity has no editor bridge, so there is nothing to route:
+every request goes to its driver, `Plugins/DreamCity/Tools/dcc.ps1`, which itself refuses
+while an editor has the project open. `dream_verify` is genuinely write-free there
+(`dcc.ps1 verify`); `dream_build` bakes the city into its asset and map.
+
+The result is read from the JSON report the driver writes, not scraped from its log: every
+diagnostic with its file, line and column -- or none, for one about the roads and lots rather
+than a line of text, which is shown as the layout's instead of being given a position it does
+not have -- and how many times the compiler said it. `dream_diagnostics(lang="city")` reads
+the last report of every city. A `.dcg` grammar or `.dck` kit is compiled with the city that
+names it.
+
 ### `dream_preview`
 
 Renders a `.dsm` and returns the picture.

@@ -1,4 +1,4 @@
-"""dream-mcp -- the MCP surface for DreamFX and DreamShader.
+"""dream-mcp -- the MCP surface for DreamFX and DreamShader, and DreamCity's driver.
 
 Phase M0 (liveness) and M1 (the disk knowledge face). Neither tool here touches the bridge
 or starts an editor: `dream_status` reads one status file, `dream_schema` reads cached
@@ -15,6 +15,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP, Image
 
+from .city import driver as city
 from .core import assets, cli, liveness as live, routing, transport
 from .core.diagnostics import read_published, summarize
 from .core.locate import LocateError, Project, resolve
@@ -116,6 +117,17 @@ def dream_status(project_dir: str | None = None) -> str:
         decision = routing.decide(project, lang)
         lines.append(f"Routing {label}: {decision.route.value.upper()} "
                      f"-- {decision.reason}")
+
+    try:
+        city.driver_path(project)
+        reports = city.latest_reports(project)
+        last = (f"; last report: {reports[0][1].city or reports[0][0].stem}, "
+                f"{reports[0][1].errors} error(s), {reports[0][1].warnings} warning(s)"
+                if reports else "")
+        lines.append(f"DreamCity: CLI only -- it has no bridge, and its driver refuses while "
+                     f"an editor has the project open{last}")
+    except cli.DriverMissing:
+        pass
 
     return "\n".join(lines)
 
@@ -310,12 +322,55 @@ def _report(header: str, decision: routing.Decision, lines: list[str]) -> str:
     return "\n".join(body)
 
 
+def _run_city(verify_only: bool, target: str, project: Project) -> str:
+    """DreamCity has no bridge: always its driver, which refuses on its own while an editor
+    holds the project."""
+    action = "verify" if verify_only else "build"
+    header = f"{action} {target}  [city]"
+    if Path(target).suffix.lower() in city.PART_EXTENSIONS:
+        return (f"{header}\n\nA grammar or a kit is compiled with the city that names it: "
+                f"verify that city's .dct (or its package, such as @dreamcity/cities/Island).")
+    try:
+        result = city.run(project, target, verify_only)
+    except cli.DriverMissing as error:
+        return f"{header}\n\n{error}"
+
+    if result.refused:
+        return (f"{header}\n  route: refuse (an editor has the project open)\n\n{result.refused}\n"
+                f"DreamCity has no bridge to route to: close the editor, or use its Compile "
+                f"button on the city actor.")
+    lines = [f"{header}\n  route: cli (DreamCity has no bridge)", "",
+             f"{'OK' if result.ok else 'FAILED'} (exit {result.exit_code})"]
+    report = result.report
+    if report is None:
+        tail = [line for line in result.output.splitlines() if line.strip()][-15:]
+        lines.append("No report was written; the driver's last lines:")
+        lines.extend(f"  {line}" for line in tail)
+        return "\n".join(lines)
+    if report.compiled:
+        lines.append(f"{report.file}: {report.blocks} blocks, {report.lots} lots, "
+                     f"{report.pieces} pieces")
+    else:
+        lines.append(f"{report.file}: does not compile")
+    if not verify_only and result.ok:
+        lines.append("Baked into its asset and map under /Game/DreamCity.")
+    lines.append(summarize(report.diagnostics))
+    ordered = sorted(zip(report.diagnostics, report.counts),
+                     key=lambda pair: (not pair[0].is_error, -pair[1]))
+    lines.extend(f"  {city.describe(item, count)}" for item, count in ordered)
+    return "\n".join(lines)
+
+
 def _run(verify_only: bool, target: str, lang: str, project_dir: str | None,
          report_writes: bool = False) -> str:
     try:
         project = _project(project_dir)
     except LocateError as error:
         return f"Could not locate the project: {error}"
+
+    if lang == "city" or (lang in ("", "auto") and (city.is_city_target(target)
+                                                    or Path(target).suffix.lower() in city.PART_EXTENSIONS)):
+        return _run_city(verify_only, target, project)
 
     try:
         detected, path = _resolve_target(project, target)
@@ -446,10 +501,15 @@ def dream_build(target: str, lang: str = "auto", project_dir: str | None = None,
 
     target: a source file (absolute, or relative to the project root), or "all".
             "all" through a live editor is QUEUED, not completed -- it returns immediately.
-    lang:   "auto" reads the extension (.dfs/.dfe/.dfm = fx, .dsm/.dsf = shader).
+            A DreamCity city is its .dct or its package (@dreamcity/cities/Island).
+    lang:   "auto" reads the extension (.dfs/.dfe/.dfm = fx, .dsm/.dsf = shader, .dct = city).
     report_writes: also list which .uasset files changed on disk. Off by default because it
             costs a full scan of Content/ and Plugins/ -- about two seconds here, against a
             warm build that finishes in half of one. Ask for it when what moved matters.
+
+    A DreamCity build compiles the city with everything it imports and bakes it into its
+    asset and map. DreamCity has no bridge, so it always takes the CLI, and is refused while
+    an editor has the project open.
     """
     return _run(False, target, lang, project_dir, report_writes)
 
@@ -468,6 +528,10 @@ def dream_verify(target: str, lang: str = "auto", project_dir: str | None = None
     asset that already exists on disk. Memory-only assets stay memory-only. Pass
     report_writes=true to be told which .uasset files that actually touched -- it costs a
     ~2 s walk, and it is the only thing that can answer it.
+
+    Write-free for DreamCity: the city is compiled and built with everything it imports and
+    nothing is saved; every diagnostic comes back with its file, line and column, or as the
+    layout's when it is about roads and lots rather than a line of text.
     """
     return _run(True, target, lang, project_dir, report_writes)
 
@@ -484,7 +548,7 @@ def dream_diagnostics(lang: str = "both", project_dir: str | None = None) -> str
     errors, when a response was already consumed, or just to see the standing state before
     deciding what to rebuild.
 
-    lang: "fx", "shader", or "both".
+    lang: "fx", "shader", "both", or "city" for the last report of each DreamCity city.
 
     Not a substitute for dream_build: this reports the last run, not the current source. A
     file edited since then is not represented here.
@@ -494,12 +558,24 @@ def dream_diagnostics(lang: str = "both", project_dir: str | None = None) -> str
     except LocateError as error:
         return f"Could not locate the project: {error}"
 
+    if lang.strip().lower() == "city":
+        reports = city.latest_reports(project)
+        if not reports:
+            return "DreamCity: no report yet -- dream_verify a city to write one."
+        blocks = []
+        for path, report in reports:
+            head = (f"DreamCity {report.city or path.stem}: {summarize(report.diagnostics)}, "
+                    f"{'compiles' if report.compiled else 'does not compile'} ({path})")
+            body = [f"  {city.describe(item, count)}" for item, count in zip(report.diagnostics, report.counts)]
+            blocks.append("\n".join([head, *body]))
+        return "\n\n".join(blocks)
+
     wanted = ["fx", "shader"] if lang.strip().lower() == "both" else [lang.strip().lower()]
     blocks: list[str] = []
 
     for which in wanted:
         if which not in ("fx", "shader"):
-            return f"lang must be \"fx\", \"shader\" or \"both\", not '{lang}'."
+            return f"lang must be \"fx\", \"shader\", \"both\" or \"city\", not '{lang}'."
 
         found, stamp = read_published(project, which)
         label = "DreamFX" if which == "fx" else "DreamShader"
