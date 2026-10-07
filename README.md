@@ -258,4 +258,5 @@ Collapsing any of the four would produce exactly that failure. `tests/test_schem
 `test_liveness.py` covers the four states with synthetic status files — BUSY, STALE and the
 crashed-editor case only occur when something has gone wrong, which is when a bug here costs
 most. `test_schema_parity.py` pins signatures against captured `dfx.ps1 schema` output; the
-CLI runs it was checked against are quoted in the docstrings.
+CLI runs it was checked against are quoted in the docstrings. `test_city.py` runs the DreamCity
+driver for real when `DREAM_MCP_CITY_HOST` names a host project's `.uproject`, and skips without it.

@@ -2,12 +2,14 @@
 driver, and what comes back is read from the driver's JSON report rather than its log.
 
 The report's shape is the commandlet's (`DreamCityCompileCommandlet.cpp`, WriteReport); the
-live test runs the real driver on the library's island when a host with DreamCity is there.
+live test runs the real driver on the library's island when DREAM_MCP_CITY_HOST names a host
+project (.uproject) with DreamCity in it.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -79,10 +81,10 @@ def test_no_driver_says_where_it_looked(tmp_path: Path) -> None:
     assert "No driver at" in reply
 
 
-HOST = Path(r"I:\UnrealProject_Moon\DEV_58\DreamCityTestHost\DreamCityTestHost.uproject")
+HOST = Path(os.environ.get("DREAM_MCP_CITY_HOST", ""))
 
 
-@pytest.mark.skipif(not HOST.exists() or shutil.which("pwsh") is None, reason="no DreamCity host here")
+@pytest.mark.skipif(not HOST.is_file() or shutil.which("pwsh") is None, reason="DREAM_MCP_CITY_HOST names no DreamCity host")
 def test_the_island_verifies_through_the_driver() -> None:
     reply = server.dream_verify("@dreamcity/cities/Island", project_dir=str(HOST))
     if "an editor has the project open" in reply:
