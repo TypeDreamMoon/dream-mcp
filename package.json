@@ -1,0 +1,48 @@
+{
+  "name": "dream-mcp",
+  "version": "2.0.0-dev",
+  "description": "MCP server for the Dream family of Unreal Engine plugins: each plugin ships a capability manifest and an in-engine endpoint, and this server turns them into tools.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "dream-mcp": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "docs",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TypeDreamMoon/dream-mcp.git"
+  },
+  "keywords": [
+    "mcp",
+    "unreal-engine",
+    "model-context-protocol"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepare": "tsc -p tsconfig.json",
+    "start": "node dist/cli.js",
+    "test": "tsc -p tsconfig.test.json && node scripts/run-tests.mjs",
+    "test:contract": "tsc -p tsconfig.test.json && node scripts/run-tests.mjs contract"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.4.0",
+    "ws": "8.22.2",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.4.0",
+    "@types/node": "22.20.5",
+    "@types/ws": "8.18.2",
+    "typescript": "7.0.2"
+  }
+}
