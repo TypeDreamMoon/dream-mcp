@@ -189,16 +189,16 @@ test('contract: real endpoints follow the protocol', { skip, timeout: 3_600_000 
                     // Long actions: the job endpoint must agree with what the tool returned.
                     // The serving process may have changed (temporary render process), so look again.
                     if (spec?.long) {
-                        const now = await mgr.probe(ws, m.id);
-                        let cur: Endpoint | undefined = now.state === 'alive' ? now.endpoint : undefined;
-                        if (!cur) {
-                            const got = await mgr.acquire(ws, plugin, reader);
-                            if ('lease' in got) {
-                                cur = got.lease.endpoint;
-                                await got.lease.release();
-                            }
+                        // Ask the router, not the discovery file: right after a temporary
+                        // rendering process the file can still name that process while it
+                        // shuts down, and the router is what knows not to use it.
+                        let cur: Endpoint | undefined;
+                        const got = await mgr.acquire(ws, plugin, reader);
+                        if ('lease' in got) {
+                            cur = got.lease.endpoint;
+                            await got.lease.release();
                         }
-                        assert.ok(cur, `no endpoint for ${m.id} after ${c.action}`);
+                        assert.ok(cur, `no endpoint for ${m.id} after ${c.action}: ${'refusal' in got ? got.refusal.summary : ''}`);
                         const call = await new EndpointClient(cur!, timings).call(`contract-${Date.now()}`, c.action, c.args ?? {});
                         if (call.kind === 'job') {
                             const w = await new EndpointClient({ ...cur!, ws: null }, timings).waitJob(call.job, { deadlineMs: timings.jobWaitMs });
