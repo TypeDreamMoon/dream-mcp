@@ -75,10 +75,19 @@ test('a project with a manifest gets dream_<id>, described line by line', async 
     try {
         assert.deepEqual(await c.names(), ['dream_demo', 'dream_engine', 'dream_workspace']);
         const tool = (await c.client.listTools()).tools.find(t => t.name === 'dream_demo')!;
-        assert.match(tool.description!, /^Demo\. A stand-in plugin/);
+        assert.match(tool.description!, /^Demo: A stand-in plugin/);
         assert.match(tool.description!, /- build\(file\*: string/);
-        const schema = tool.inputSchema as unknown as { properties: { action: { enum: string[] } } };
-        assert.deepEqual(schema.properties.action.enum, ['echo', 'fail', 'build', 'snap', 'slow', 'stuck', 'poke', 'lookup', 'files', 'help', 'reference']);
+        // No enum: an unknown action must reach the dispatcher, which explains what exists.
+        const schema = tool.inputSchema as unknown as { properties: { action: { enum?: string[]; description: string } } };
+        assert.equal(schema.properties.action.enum, undefined);
+        assert.match(schema.properties.action.description, /One of: echo, fail, build, snap, slow, stuck, poke, lookup, files, help, reference\./);
+        const unknown = await c.call('dream_demo', 'explode');
+        assert.equal(unknown.isError, true);
+        assert.match(c.text(unknown), /\[refused: unknown-action\] dream_demo has no action "explode"\./);
+        assert.match(c.text(unknown), /Next:\n {2}- Use one of: echo, fail, build/);
+        assert.equal(unknown.structuredContent?.reason, 'unknown-action');
+        const coreUnknown = await c.call('dream_engine', 'explode');
+        assert.match(c.text(coreUnknown), /unknown-action[\s\S]*Use one of: status, start/);
 
         const status = await c.call('dream_workspace', 'status');
         assert.match(c.text(status), /DemoPlugin 1\.2\.3 \[project\] -> tool dream_demo/);
@@ -426,6 +435,28 @@ test('a job whose engine died is reported as failed and does not linger in statu
         assert.match(c.text(await c.call('dream_demo', 'echo', { text: 'again' })), /^echo: again/);
     } finally {
         await c.done();
+        await p.cleanup();
+    }
+});
+
+test('text output: artifact paths are listed, data is compact and capped', async () => {
+    const p = await makeProject({ fixtures: ['DemoPlugin'] });
+    const editor = await openEditor(p);
+    const c = await connect(p);
+    try {
+        const snap = await c.call('dream_demo', 'snap', { file: 'Demo/a.dmo' });
+        assert.match(c.text(snap), /^Image: Saved\/DreamMCP\/artifacts\/job-[0-9a-f]+\.png \(preview\)$/m);
+        const echo = await c.call('dream_demo', 'echo', { text: 'hi' });
+        const dataText = echo.content.filter(x => x.type === 'text')[1]!.text!;
+        assert.match(dataText, /^data: \{"text":"hi","mode":"editor","pid":\d+\}$/);
+        const big = await c.call('dream_demo', 'echo', { text: 'x'.repeat(6000) });
+        const bigText = big.content.filter(x => x.type === 'text')[1]!.text!;
+        assert.match(bigText, /^data \(first 4000 of \d+ characters; the complete object is the "data" field of the structured content\)/);
+        assert.ok(bigText.length < 4300);
+        assert.equal(((big.structuredContent!.data as { text: string }).text).length, 6000);
+    } finally {
+        await c.done();
+        await editor.stop();
         await p.cleanup();
     }
 });

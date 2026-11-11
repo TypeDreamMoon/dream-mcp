@@ -24,7 +24,6 @@ export function tags(a: ActionSpec): string {
     if (a.needs === 'none') t.push('offline');
     if (a.needs === 'render') t.push('renders');
     if (a.writes) t.push('writes');
-    if (a.long) t.push('slow');
     return t.length ? ` [${t.join(', ')}]` : '';
 }
 
@@ -34,7 +33,9 @@ export function actionLine(a: ActionSpec): string {
 
 /** The tool description: what the plugin is, then one line per action, so a model can call it without `help`. */
 export function describePluginTool(m: Manifest): string {
-    const lines = [`${m.title}. ${m.description.trim()}`];
+    // Most descriptions already start with the plugin name; do not say it twice.
+    const desc = m.description.trim();
+    const lines = [desc.toLowerCase().startsWith(m.title.toLowerCase()) ? desc : `${m.title}: ${desc}`];
     if (m.sourceRoots.length || m.extensions.length) {
         const roots = m.sourceRoots.length ? m.sourceRoots.map(r => r.replace(/\/?$/, '/')).join(', ') : 'the project';
         lines.push(`Sources live under ${roots}${m.extensions.length ? ` (${m.extensions.join(', ')})` : ''}.`);
@@ -45,7 +46,7 @@ export function describePluginTool(m: Manifest): string {
     lines.push('- help(action?: string): list actions and their full arguments.');
     if (m.reference.length) lines.push(`- reference(doc?: string, offset?: integer, limit?: integer): list or read the docs (${m.reference.map(r => r.title).join('; ')}).`);
     else lines.push('- reference(): list the reference docs (none declared).');
-    lines.push('Tags: offline = answered from files, no engine; renders = needs a rendering engine; writes = changes assets; slow = may take minutes.');
+    lines.push('Tags: offline = answered from files, no engine; renders = needs a rendering engine; writes = changes assets.');
     return lines.join('\n');
 }
 
@@ -55,7 +56,7 @@ export function helpText(m: Manifest, action?: string): string {
         if (!a) return `Unknown action "${action}". Actions: ${m.actions.map(x => x.name).join(', ')}, help, reference.`;
         const props = a.args.properties ?? {};
         const required = new Set(a.args.required ?? []);
-        const lines = [`${a.name}: ${a.description}`, `needs: ${a.needs}; writes: ${a.writes}; long: ${a.long}`];
+        const lines = [`${a.name}: ${a.description}`, `needs: ${a.needs}; writes assets: ${a.writes ? 'yes' : 'no'}${a.long ? '; runs as a job (the call still waits for the result)' : ''}`];
         if (!Object.keys(props).length) lines.push('No arguments.');
         else {
             lines.push('Arguments:');

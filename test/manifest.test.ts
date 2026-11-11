@@ -65,9 +65,14 @@ test('the tool description lists every action with its arguments', async () => {
     const m = checkManifest(await demoManifest()).manifest!;
     const d = describePluginTool(m);
     for (const a of m.actions) assert.ok(d.includes(`- ${a.name}(`), a.name);
-    assert.match(d, /- build\(file\*: string, steps\?: integer, stepMs\?: integer\): .*\[writes, slow\]/);
+    assert.match(d, /- build\(file\*: string, steps\?: integer, stepMs\?: integer\): .*\[writes\]$/m);
     assert.match(d, /- lookup\(name\*: string\): .*\[offline\]/);
-    assert.match(d, /- snap\(file\*: string\): .*\[renders, slow\]/);
+    assert.match(d, /- snap\(file\*: string\): .*\[renders\]$/m);
+    // "long" only means the job model; it is never shown as "slow".
+    assert.doesNotMatch(d, /slow =|\[slow|, slow\]/);
+    // The title is not repeated when the description already starts with it.
+    assert.match(d, /^Demo: A stand-in plugin/);
+    assert.match(describePluginTool({ ...m, description: 'Demo turns text into things.' }), /^Demo turns text into things\./);
     assert.match(d, /- help\(action\?: string\)/);
     assert.match(d, /reference\(doc\?: string.*Demo language; Node catalog/);
     assert.match(helpText(m, 'build'), /file \(string, required\)/);

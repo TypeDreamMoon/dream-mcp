@@ -6,6 +6,8 @@ import { isInside } from '../util/fs.js';
 
 const IMAGE_TYPES: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' };
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+/** How much of a result's data object is repeated in the text. */
+const DATA_TEXT_LIMIT = 4000;
 
 export function textResult(text: string, isError = false, structured?: Record<string, unknown>): CallToolResult {
     return { content: [{ type: 'text', text }], ...(structured ? { structuredContent: structured } : {}), ...(isError ? { isError: true } : {}) };
@@ -33,13 +35,25 @@ export async function renderResult(result: ResultBody, opts: { projectDir?: stri
         if (result.diagnostics.length > 200) lines.push(`  ... ${result.diagnostics.length - 200} more in the structured content`);
     }
     if (result.writes.length) lines.push('Writes: ' + result.writes.map(w => `${w.asset} (${w.state})`).join(', '));
+    // Paths in the text too: not every client hands structured content to the model.
+    for (const a of result.artifacts) lines.push(`${a.kind === 'image' ? 'Image' : `Artifact (${a.kind})`}: ${a.path}${a.title ? ` (${a.title})` : ''}`);
     for (const n of opts.notes ?? []) lines.push('Note: ' + n);
     if (result.next.length) {
         lines.push('Next:');
         for (const n of result.next) lines.push('  - ' + n);
     }
     const content: CallToolResult['content'] = [{ type: 'text', text: lines.join('\n') }];
-    if (Object.keys(result.data).length) content.push({ type: 'text', text: 'data: ' + JSON.stringify(result.data, null, 2) });
+    if (Object.keys(result.data).length) {
+        // Compact, and capped: the full object is in the structured content anyway.
+        const json = JSON.stringify(result.data);
+        content.push({
+            type: 'text',
+            text:
+                json.length <= DATA_TEXT_LIMIT
+                    ? `data: ${json}`
+                    : `data (first ${DATA_TEXT_LIMIT} of ${json.length} characters; the complete object is the "data" field of the structured content): ${json.slice(0, DATA_TEXT_LIMIT)}…`,
+        });
+    }
 
     for (const a of result.artifacts) {
         const ext = path.extname(a.path).toLowerCase();

@@ -30,7 +30,9 @@ function actionSchema(actions: readonly string[], argsHelp: string) {
     return fromJsonSchema<{ action: string; args?: Record<string, unknown> }>({
         type: 'object',
         properties: {
-            action: { type: 'string', enum: [...actions], description: 'What to do; see the tool description.' },
+            // No enum on purpose: an unknown action reaches the dispatcher, which answers with
+            // the list of actions and what to do next instead of a bare schema error.
+            action: { type: 'string', description: `What to do. One of: ${actions.join(', ')}.` },
             args: { type: 'object', description: argsHelp, additionalProperties: true },
         },
         required: ['action'],
