@@ -38,6 +38,16 @@ npx -y github:TypeDreamMoon/dream-mcp
 
 `npx <path to the clone>` works from anywhere.
 
+From a packed tarball (`npm pack`), name the package explicitly:
+
+```bash
+npx -y --package <path>/dream-mcp-<version>.tgz dream-mcp
+```
+
+Do not run `npx -y <file>.tgz`: npx then tries to execute the tarball itself, which on
+Windows opens it with whatever program is associated with `.tgz`, and the MCP client
+times out.
+
 ### Register it with Claude Code
 
 From the Unreal project folder:
@@ -75,6 +85,7 @@ the project.
 | `DREAM_MCP_HOME` | Where the workspace registry, start locks and host logs live. Default `~/.dream-mcp`. |
 | `DREAM_MCP_JOB_WAIT_MS` | How long one tool call waits for a long job before handing back a job id. Default 10 min. |
 | `DREAM_MCP_START_TIMEOUT_MS` | How long to wait for a started engine to answer. Default 10 min. |
+| `DREAM_MCP_EDITOR_WAIT_MS` | How long a write waits for an editor that is opening the project to publish its endpoint. Default 2 min. |
 
 ## Workspaces
 
@@ -155,6 +166,20 @@ content.
   second process writing the same assets. Read-only actions may still run in a host.
 - Actions that write assets run one at a time per project.
 - dream-mcp only ever stops processes it started itself, by the process id it recorded.
+- Before a write runs in its own host, dream-mcp checks whether another Unreal process is
+  opening the project (an editor takes several seconds to publish its endpoint). If so, the
+  write waits for that endpoint and goes to the editor; if none appears within
+  `DREAM_MCP_EDITOR_WAIT_MS` (default 2 min) the write is refused with the reason.
+
+## Known limitations
+
+- If the MCP client ends the server by killing its whole process tree (some clients do on
+  exit), the engine host is killed with it: it gets no `/shutdown`, and a save in progress
+  at that moment can be cut off. Its discovery file is left behind; the next run sees that
+  its pid is gone, treats it as stale and replaces it. Clients that close the server's
+  stdin (the normal way) give the host a clean shutdown.
+- A host this server did not start (another dream-mcp's) is never stopped from here, so a
+  rendering action on a project held by another session's headless host is refused.
 
 ## Adding dream-mcp support to a plugin
 

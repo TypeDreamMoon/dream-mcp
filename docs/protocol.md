@@ -232,23 +232,41 @@ It refuses instead of starting a second process when the project may still be he
 - discovery file present, pid alive, `hello` not answering (or another protocol):
   `refused`, reason `endpoint-unresponsive`;
 - an editor (or any Unreal process) has the project open without an endpoint for this
-  plugin: write actions are refused (`editor-without-endpoint`), read-only actions may start
-  a host.
+  plugin: write actions wait for its endpoint to appear (an editor publishes it some seconds
+  after it starts) and then go to the editor; if it does not appear within
+  `DREAM_MCP_EDITOR_WAIT_MS` they are refused (`editor-without-endpoint`). Read-only actions
+  are not held up and may start a host.
+
+The check for "another Unreal process has the project open" runs before every write in a
+process the server owns: a cheap process list, refreshed in the background every two seconds
+while a host runs, and a command-line scan only when that list changes.
 
 When the editor opens while a host is running, the host finishes its current work and is
 shut down. A host is shut down after `engine.idleMinutes` without calls and when the server
 exits. A host that ignores `/shutdown` is killed by the pid recorded when it was started;
-nothing is ever killed by name.
+nothing is ever killed by name. A host that is shutting down, or has died, is never given
+new calls; the next call starts a fresh one.
 
-A headless project runs `needs: "render"` actions in a separate rendering host (a windowless editor) started
-for that one call (the headless host is stopped first, since both would write the same
-discovery files), and the result's `next` explains why it was slow.
+A headless project runs `needs: "render"` actions in a separate rendering host (a windowless
+editor) started for that one call (the headless host is stopped first, since both would write
+the same discovery files), and the result's `next` explains why it was slow. The next
+non-rendering call starts the headless host again.
+
+## 4a. Known limitations
+
+- If the MCP client ends dream-mcp by killing its process tree, the host dies with it
+  without `/shutdown`; a save in progress can be cut off. The discovery file it leaves is
+  recognised as stale on the next run (its pid is gone) and replaced. Endpoints should keep
+  writes short and atomic where they can.
+- The window between an editor process starting and its endpoint appearing is covered for
+  writes from hosts dream-mcp owns (above), not for other tools that write assets.
 
 ## 5. Refusal reasons the server itself produces
 
 | `reason` | When |
 |---|---|
-| `unknown-action`, `bad-args` | The action or its arguments do not match the manifest. |
+| `unknown-action`, `bad-args` | The action or its arguments do not match the manifest. The tool schema does not enumerate actions, so an unknown name always gets this answer with the list of actions. |
+| `engine-exited` | A job was lost because its engine process exited. |
 | `endpoint-unresponsive` | Something holds the project but does not answer. |
 | `editor-without-endpoint` | An editor holds the project without this plugin's endpoint; write refused. |
 | `plugin-not-loaded` | A host runs but this plugin has no endpoint in it. |

@@ -34,6 +34,15 @@ npx -y github:TypeDreamMoon/dream-mcp
 
 在任何目录下都可以 `npx <克隆目录的路径>`。
 
+用 `npm pack` 打出的压缩包运行时,要显式写包名:
+
+```bash
+npx -y --package <路径>/dream-mcp-<版本>.tgz dream-mcp
+```
+
+不要写 `npx -y <文件>.tgz`:npx 会去执行压缩包本身,Windows 上会用关联 `.tgz` 的程序打开它,
+MCP 客户端随后超时。
+
 ### 在 Claude Code 里注册
 
 在 Unreal 工程目录下:
@@ -70,6 +79,7 @@ claude mcp add dream -- npx -y <克隆目录的路径>
 | `DREAM_MCP_HOME` | 工程登记表、启动锁和宿主日志的位置。默认 `~/.dream-mcp`。 |
 | `DREAM_MCP_JOB_WAIT_MS` | 一次工具调用等长任务多久,超时就交回任务 id。默认 10 分钟。 |
 | `DREAM_MCP_START_TIMEOUT_MS` | 等新起的引擎应答多久。默认 10 分钟。 |
+| `DREAM_MCP_EDITOR_WAIT_MS` | 写动作等「正在打开工程的编辑器」发布端点等多久。默认 2 分钟。 |
 
 ## 工程(workspace)
 
@@ -140,6 +150,16 @@ claude mcp add dream -- npx -y <克隆目录的路径>
   而不是让第二个进程去写同一批资产。只读动作仍可在宿主里跑。
 - 写资产的动作同一工程内一个一个执行。
 - dream-mcp 只关自己起的进程,而且只按它记下的进程号关。
+- 在自己的宿主上执行写动作之前,dream-mcp 会检查有没有别的 Unreal 进程正在打开这个工程
+  (编辑器要过好几秒才发布端点)。有的话,写动作等那个端点出现后交给编辑器;
+  `DREAM_MCP_EDITOR_WAIT_MS`(默认 2 分钟)内没出现就拒绝并说明原因。
+
+## 已知限制
+
+- MCP 客户端如果按整棵进程树结束服务端(有的客户端退出时会这样),引擎宿主会被一起硬结束:
+  收不到 `/shutdown`,正在存盘的话可能被打断。它的发现文件会残留,下次运行时因 pid 已不在而被识别为陈旧并覆盖。
+  正常关闭服务端 stdin 的客户端会让宿主干净退出。
+- 不是本服务起的宿主(别的 dream-mcp 起的)从这里永远不会被停掉,所以工程被另一个会话的 headless 宿主占着时,要渲染的动作会被拒绝。
 
 ## 给插件加 dream-mcp 支持
 
