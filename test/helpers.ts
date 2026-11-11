@@ -102,7 +102,7 @@ export function load(p: TestProject, config?: { mode?: 'render' | 'headless'; id
 }
 
 export function fastTimings(over: Partial<Timings> = {}): Timings {
-    return { ...defaultTimings({}), helloMs: 800, callMs: 5000, jobWaitMs: 10_000, pollMs: 20, startMs: 15_000, stopMs: 3000, tickMs: 60_000, ...over };
+    return { ...defaultTimings({}), helloMs: 800, callMs: 5000, jobWaitMs: 10_000, pollMs: 20, startMs: 15_000, stopMs: 3000, tickMs: 60_000, startNoteMs: 100, ...over };
 }
 
 /**

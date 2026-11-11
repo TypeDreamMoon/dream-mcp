@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import type { Timings } from '../src/config.js';
-import { EngineManager, type Acquired } from '../src/engine/manager.js';
+import { effectiveMode, EngineManager, modeFallback, type Acquired } from '../src/engine/manager.js';
 import { EndpointClient } from '../src/protocol/client.js';
 import { demoBehaviors } from './fake/demo.js';
 import { FakeEngine, type FakeManifest } from './fake/endpoint.js';
@@ -71,15 +71,18 @@ test('rule 3: nothing running starts a render host with the documented command l
     try {
         const l = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('echo')));
         assert.equal(l.via, 'host');
-        assert.match(l.notes.join(), /Started the engine host \(render, pid \d+\) in [\d.]+ s/);
+        assert.match(l.notes.join(), /Started the engine host \(render, a windowless editor, pid \d+\) in [\d.]+ s/);
         assert.equal(t.launcher.spawned.length, 1);
         const s = t.launcher.spawned[0]!;
         assert.match(s.command.replace(/\\/g, '/'), /Engine\/Binaries\/\w+\/UnrealEditor-Cmd(\.exe)?$/);
         assert.equal(s.args[0], t.ws.uproject);
-        assert.ok(s.args.includes('-run=DemoHost'));
-        for (const f of ['-unattended', '-nosplash', '-nopause', '-stdout', '-AllowCommandletRendering']) assert.ok(s.args.includes(f), f);
-        assert.ok(!s.args.includes('-nullrhi'));
+        // Rendering form: a windowless full editor, never a commandlet.
+        assert.ok(!s.args.some(a => a.startsWith('-run=')), s.args.join(' '));
+        for (const f of ['-DreamMCPHost', '-RenderOffscreen', '-unattended', '-nosplash', '-nosound']) assert.ok(s.args.includes(f), f);
+        for (const f of ['-nullrhi', '-AllowCommandletRendering']) assert.ok(!s.args.includes(f), f);
         assert.ok(s.args.some(a => /^-DreamMCPPort=\d+$/.test(a)));
+        assert.ok(s.args.includes(`-DreamMCPParentPid=${process.pid}`));
+        assert.equal(l.endpoint.mode, 'host');
         // The token travels in the environment only, never on the command line.
         assert.ok(!s.args.some(a => /DreamMCPToken|[0-9a-f]{48}/.test(a)), s.args.join(' '));
         assert.match(s.env.DREAM_MCP_TOKEN ?? '', /^[0-9a-f]{48}$/);
@@ -96,13 +99,46 @@ test('rule 3: nothing running starts a render host with the documented command l
     }
 });
 
-test('headless config starts with -nullrhi', async () => {
+test('headless config runs the first plugin\'s host commandlet with -nullrhi', async () => {
     const t = await setup({ config: { mode: 'headless' } });
     try {
         const l = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('echo')));
-        assert.ok(t.launcher.spawned[0]!.args.includes('-nullrhi'));
+        const args = t.launcher.spawned[0]!.args;
+        assert.deepEqual(args.slice(0, 4), [t.ws.uproject, '-run=DemoHost', '-nullrhi', '-DreamMCPHost']);
+        for (const f of ['-unattended', '-nosplash', '-nopause', `-DreamMCPParentPid=${process.pid}`]) assert.ok(args.includes(f), f);
+        assert.ok(!args.includes('-RenderOffscreen'));
+        assert.match(l.notes.join(), /Started the engine host \(headless, pid \d+\)/);
         assert.equal(l.endpoint.render, false);
         await l.release();
+    } finally {
+        await t.done();
+    }
+});
+
+test('headless config without any host commandlet falls back to the rendering form', async () => {
+    const demo = await demoManifest();
+    const { host: _host, ...noHost } = demo;
+    const t = await setup({ config: { mode: 'headless' }, spec: { fixtures: [], plugins: [{ name: 'DemoPlugin', manifest: noHost }] } });
+    try {
+        assert.equal(effectiveMode(t.ws), 'render');
+        assert.match(modeFallback(t.ws) ?? '', /falls back to a rendering host/);
+        // A render action needs no temporary process: the fallback host renders.
+        const l = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('snap')));
+        assert.equal(l.via, 'host');
+        assert.equal(t.launcher.spawned.length, 1);
+        assert.ok(t.launcher.spawned[0]!.args.includes('-RenderOffscreen'));
+        await l.release();
+    } finally {
+        await t.done();
+    }
+});
+
+test('the host is told which process is its parent', async () => {
+    const t = await setup();
+    try {
+        const l = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('echo')));
+        await l.release();
+        assert.match(t.mgr.logs(t.ws).lines.join('\n'), new RegExp(`host=true .*parent=${process.pid}`));
     } finally {
         await t.done();
     }
@@ -350,17 +386,17 @@ test('headless project, render action: resident host stops, a temporary render p
         const resident = t.launcher.spawned[0]!;
         const l2 = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('snap')));
         assert.equal(l2.via, 'temp-render');
-        assert.match(l2.next.join(), /headless.*separate render process/);
+        assert.match(l2.next.join(), /headless.*separate rendering process \(a windowless editor\)/);
         await waitFor(() => resident.proc.exitCode !== undefined, 5000, 'resident exit');
         const temp = t.launcher.spawned[1]!;
-        assert.ok(temp.args.includes('-AllowCommandletRendering'));
+        assert.ok(temp.args.includes('-RenderOffscreen') && !temp.args.some(a => a.startsWith('-run=')), temp.args.join(' '));
         assert.equal(l2.endpoint.render, true);
         await l2.release();
         await waitFor(() => temp.proc.exitCode !== undefined, 5000, 'temp exit');
         assert.deepEqual(t.launcher.killed, []);
         // The next ordinary call brings the headless host back.
         const l3 = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('echo')));
-        assert.ok(t.launcher.spawned[2]!.args.includes('-nullrhi'));
+        assert.ok(t.launcher.spawned[2]!.args.includes('-nullrhi') && t.launcher.spawned[2]!.args.includes('-run=DemoHost'));
         await l3.release();
     } finally {
         await t.done();

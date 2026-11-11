@@ -1,8 +1,11 @@
 /**
- * A Node stand-in for the engine's resident host commandlet. Started with the same
- * arguments dream-mcp passes to UnrealEditor-Cmd. It loads every Dream plugin manifest in
- * the project, serves them on one port, writes the discovery files, exits on /shutdown or
- * when its parent goes away, and deletes only the discovery files that still name it.
+ * A Node stand-in for an engine host process (the windowless editor or a host commandlet),
+ * started with the same arguments dream-mcp passes to UnrealEditor-Cmd. Like a real
+ * endpoint it reports `mode: "host"` only with -DreamMCPHost, renders unless -nullrhi is
+ * given, and watches the parent named by -DreamMCPParentPid (0 = none, absent = its own
+ * parent). It loads every Dream plugin manifest in the project, serves them on one port,
+ * writes the discovery files, exits on /shutdown or when its parent goes away, and deletes
+ * only the discovery files that still name it.
  *
  * Environment knobs for tests:
  *   FAKE_HOST_DELAY_MS        wait this long before listening (a slow engine boot)
@@ -31,7 +34,10 @@ async function main(): Promise<void> {
         process.exit(4);
     }
     const render = !argv.includes('-nullrhi');
-    process.stdout.write(`FakeHost: run=${flag('run')} port=${port} render=${render}\n`);
+    const asHost = argv.includes('-DreamMCPHost');
+    const parentArg = flag('DreamMCPParentPid');
+    const parent = parentArg === undefined ? process.ppid : Number(parentArg);
+    process.stdout.write(`FakeHost: run=${flag('run') ?? '(editor)'} host=${asHost} port=${port} render=${render} parent=${parent}\n`);
 
     if (process.env.FAKE_HOST_EXIT_CODE) {
         process.stdout.write('FakeHost: crashing on purpose\n');
@@ -52,7 +58,7 @@ async function main(): Promise<void> {
     };
     engine = new FakeEngine({
         projectDir,
-        mode: 'host',
+        mode: asHost ? 'host' : 'editor',
         render,
         port: port + Number(process.env.FAKE_HOST_PORT_SHIFT ?? 0),
         token,
@@ -69,14 +75,14 @@ async function main(): Promise<void> {
     await engine.start();
     process.stdout.write(`FakeHost: listening on ${engine.port} for ${[...engine.plugins.keys()].join(',')}\n`);
 
-    const parent = process.ppid;
-    setInterval(() => {
-        try {
-            process.kill(parent, 0);
-        } catch {
-            void exit('parent gone');
-        }
-    }, 500);
+    if (parent > 0)
+        setInterval(() => {
+            try {
+                process.kill(parent, 0);
+            } catch {
+                void exit('parent gone');
+            }
+        }, 500);
 }
 
 main().catch(error => {

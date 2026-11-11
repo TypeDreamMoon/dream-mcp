@@ -82,7 +82,7 @@ async function inspect(uplugin: string, source: 'project' | 'engine', refs: UPro
     if (manifest && manifest.plugin.toLowerCase() !== name.toLowerCase())
         warnings.push(`manifest "plugin" is "${manifest.plugin}" but the .uplugin is ${name}.uplugin`);
     if (manifest && !manifest.host && manifest.actions.some(a => a.needs !== 'none'))
-        warnings.push('no "host.commandlet": engine actions only work while the editor is open');
+        warnings.push('no "host.commandlet": a headless setting falls back to a rendering host (a windowless editor)');
     if (!manifest) enabled = false;
 
     return {

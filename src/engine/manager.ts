@@ -30,7 +30,8 @@ export interface HostRecord {
     temporary: boolean;
     ownerId: string;
     ownerRoute: string;
-    commandlet: string;
+    /** The headless host commandlet; undefined for the rendering (windowless editor) form. */
+    commandlet?: string;
     pluginIds: string[];
     idleMinutes: number;
     proc: SpawnedProcess;
@@ -60,6 +61,54 @@ export interface Lease {
 
 export type Acquired = { lease: Lease } | { refusal: ResultBody };
 
+/** Called while a host starts, so a tool call can keep reporting progress during a long engine boot. */
+export type StartProgress = (message: string, elapsedMs: number) => void;
+
+export interface HostLaunch {
+    /** The form that will actually run (a headless request without a commandlet runs rendering). */
+    mode: EngineMode;
+    args: string[];
+    commandlet?: string;
+    /** The plugin whose route answers `hello` and `/shutdown` for the host as a whole. */
+    owner?: FoundPlugin;
+    /** Set when the headless setting cannot be honoured. */
+    fallback?: string;
+}
+
+/**
+ * The command line for a host process. Both forms carry `-DreamMCPHost`, which makes every
+ * Dream endpoint in the process publish `mode: "host"`, accept `/shutdown` and exit when the
+ * parent named by `-DreamMCPParentPid` goes away. The token travels in DREAM_MCP_TOKEN.
+ *
+ * - render: a windowless full editor (`-RenderOffscreen`), because commandlets cannot render
+ *   previews; no `-run=`.
+ * - headless: the first plugin's `host.commandlet` with `-nullrhi`. Without one, the
+ *   rendering form is used instead.
+ */
+export function hostLaunch(ws: Workspace, requested: EngineMode, port: number, parentPid: number): HostLaunch {
+    const withHost = ws.discovery.active.find(p => p.manifest!.host);
+    // -stdout is not part of the protocol; it is what `dream_engine logs` reads.
+    const tail = [`-DreamMCPPort=${port}`, `-DreamMCPParentPid=${parentPid}`, '-stdout'];
+    if (requested === 'headless' && withHost) {
+        const commandlet = withHost.manifest!.host!.commandlet;
+        return {
+            mode: 'headless',
+            commandlet,
+            owner: withHost,
+            args: [ws.uproject, `-run=${commandlet}`, '-nullrhi', '-DreamMCPHost', '-unattended', '-nosplash', '-nopause', ...tail],
+        };
+    }
+    const owner = ws.discovery.active[0];
+    return {
+        mode: 'render',
+        ...(owner ? { owner } : {}),
+        args: [ws.uproject, '-DreamMCPHost', '-RenderOffscreen', '-unattended', '-nosplash', '-nosound', ...tail],
+        ...(requested === 'headless'
+            ? { fallback: 'No plugin in this project declares a host commandlet, so the headless setting falls back to a rendering host (a windowless editor).' }
+            : {}),
+    };
+}
+
 export interface EngineManagerOptions {
     launcher: ProcessLauncher;
     timings: Timings;
@@ -75,6 +124,7 @@ export class EngineManager {
     private readonly writeLocks = new Map<string, Mutex>();
     private readonly renderLocks = new Map<string, Mutex>();
     private readonly starting = new Map<string, Promise<HostRecord | ResultBody>>();
+    private readonly startListeners = new Map<string, Set<StartProgress>>();
     private timer?: NodeJS.Timeout;
     private readonly launcher: ProcessLauncher;
     readonly timings: Timings;
@@ -140,7 +190,7 @@ export class EngineManager {
      * rules: an open editor wins; else a host already running; else start one. Refuses
      * rather than starting a second process whenever something else may hold the project.
      */
-    async acquire(ws: Workspace, plugin: FoundPlugin, action: ActionSpec): Promise<Acquired> {
+    async acquire(ws: Workspace, plugin: FoundPlugin, action: ActionSpec, onProgress?: StartProgress): Promise<Acquired> {
         const id = plugin.manifest!.id;
         const key = EngineManager.key(ws);
         const needRender = action.needs === 'render';
@@ -161,13 +211,19 @@ export class EngineManager {
                     return { lease: this.lease(p.endpoint, 'editor', undefined, [`Served by the open editor (pid ${p.disc.pid}).`]) };
                 }
                 if (own && own.pid === p.disc.pid) {
-                    if (needRender && own.mode !== 'render') return this.tempRender(ws, plugin, action);
+                    if (needRender && own.mode !== 'render') return this.tempRender(ws, plugin, action, onProgress);
                     return { lease: this.lease(p.endpoint, 'host', own, []) };
                 }
                 if (needRender && !p.hello.render)
-                    return refuse('render-unavailable', `A headless engine host started by another dream-mcp (pid ${p.disc.pid}) holds this project and cannot render.`, [
-                        'Wait for that host to go idle and exit, or stop it from the dream-mcp that started it, then retry.',
-                    ]);
+                    return refuse(
+                        'render-unavailable',
+                        `"${action.name}" needs rendering, but this project is held by a headless engine host that another dream-mcp process started (pid ${p.disc.pid}). This server may not stop a process it did not start, and starting a render process beside it would put two engines on the same project.`,
+                        [
+                            'In the session whose dream-mcp started that host, call dream_engine stop (or wait for its idle shutdown), then retry here.',
+                            'Or open the project in the editor: an open editor serves every action, including rendering ones.',
+                        ],
+                        { pid: p.disc.pid },
+                    );
                 return { lease: this.lease(p.endpoint, 'other-host', undefined, [`Served by an engine host another dream-mcp started (pid ${p.disc.pid}).`]) };
             }
 
@@ -185,7 +241,7 @@ export class EngineManager {
             if (own && !own.stopping && own.exitCode === undefined) {
                 const direct = await this.helloOn(own, plugin);
                 if (direct) {
-                    if (needRender && own.mode !== 'render') return this.tempRender(ws, plugin, action);
+                    if (needRender && own.mode !== 'render') return this.tempRender(ws, plugin, action, onProgress);
                     return { lease: this.lease(direct, 'host', own, []) };
                 }
                 return refuse('plugin-not-loaded', `The engine host (pid ${own.pid}) is running but ${plugin.name} has no endpoint in it.`, [
@@ -197,8 +253,8 @@ export class EngineManager {
             const blocker = await this.whoHoldsProject(ws, id, action);
             if (blocker) return { refusal: blocker };
 
-            if (needRender && ws.config.engine.mode === 'headless') return this.tempRender(ws, plugin, action);
-            const started = await this.ensureHost(ws, needRender ? 'render' : ws.config.engine.mode, false);
+            if (needRender && effectiveMode(ws) === 'headless') return this.tempRender(ws, plugin, action, onProgress);
+            const started = await this.ensureHost(ws, needRender ? 'render' : ws.config.engine.mode, false, onProgress);
             if ('refusal' in started) {
                 if (started.refusal.reason === 'host-starting-elsewhere') continue;
                 return started;
@@ -211,7 +267,7 @@ export class EngineManager {
                     'dream_engine logs shows the host output.',
                 ]);
             const secs = (((host.readyAt ?? this.now()) - host.startedAt) / 1000).toFixed(1);
-            return { lease: this.lease(ep, 'host', host, [`Started the engine host (${host.mode}, pid ${host.pid}) in ${secs} s; later calls reuse it.`]) };
+            return { lease: this.lease(ep, 'host', host, [`Started the engine host (${host.mode === 'render' ? 'render, a windowless editor' : 'headless'}, pid ${host.pid}) in ${secs} s; later calls reuse it.`]) };
         }
         return refuse('endpoint-unresponsive', 'The engine did not settle after several attempts.', ['Call dream_engine status to see what is running, then retry.']);
     }
@@ -299,7 +355,7 @@ export class EngineManager {
      * resident headless host is stopped first, because both processes would write the
      * same discovery files and the same packages.
      */
-    private async tempRender(ws: Workspace, plugin: FoundPlugin, action: ActionSpec): Promise<Acquired> {
+    private async tempRender(ws: Workspace, plugin: FoundPlugin, action: ActionSpec, onProgress?: StartProgress): Promise<Acquired> {
         const key = EngineManager.key(ws);
         let lock = this.renderLocks.get(key);
         if (!lock) this.renderLocks.set(key, (lock = new Mutex()));
@@ -314,7 +370,7 @@ export class EngineManager {
                 while (own.inflight > 0 && this.now() < deadline) await sleep(100);
                 await this.stopHost(own, 'making room for a render process');
             }
-            const started = await this.ensureHost(ws, 'render', true);
+            const started = await this.ensureHost(ws, 'render', true, onProgress);
             if ('refusal' in started) return started;
             const ep = await this.helloOn(started.host, plugin, 15_000);
             if (!ep) {
@@ -322,7 +378,7 @@ export class EngineManager {
                 return refuse('plugin-not-loaded', `The render process started but ${plugin.name} has no endpoint in it.`, ['dream_engine logs shows its output.']);
             }
             const secs = (((started.host.readyAt ?? this.now()) - started.host.startedAt) / 1000).toFixed(1);
-            const why = `This project's engine host is headless, so "${action.name}" ran in a separate render process that took ${secs} s to start and stops afterwards. To keep a rendering host resident, call dream_workspace add with mode "render".`;
+            const why = `This project's engine host is headless, so "${action.name}" ran in a separate rendering process (a windowless editor) that took ${secs} s to start and stops afterwards. To keep a rendering host resident, call dream_workspace add with mode "render".`;
             return { lease: this.lease(ep, 'temp-render', started.host, [`Started a temporary render process (pid ${started.host.pid}) in ${secs} s.`], [why]) };
         });
     }
@@ -330,26 +386,35 @@ export class EngineManager {
     // ------------------------------------------------------------------ starting
 
     /** Start this project's host unless one is already starting; concurrent callers share one start. */
-    async ensureHost(ws: Workspace, mode: EngineMode, temporary: boolean): Promise<{ host: HostRecord } | { refusal: ResultBody }> {
+    async ensureHost(ws: Workspace, mode: EngineMode, temporary: boolean, onProgress?: StartProgress): Promise<{ host: HostRecord } | { refusal: ResultBody }> {
         const key = EngineManager.key(ws);
         const existing = this.hosts.get(key);
         if (existing && existing.exitCode === undefined && !existing.stopping && existing.readyAt) return { host: existing };
+        let listeners = this.startListeners.get(key);
+        if (!listeners) this.startListeners.set(key, (listeners = new Set()));
+        if (onProgress) listeners.add(onProgress);
         let pending = this.starting.get(key);
         if (!pending) {
-            pending = this.startHost(ws, mode, temporary).finally(() => this.starting.delete(key));
+            pending = this.startHost(ws, mode, temporary).finally(() => {
+                this.starting.delete(key);
+                this.startListeners.delete(key);
+            });
             this.starting.set(key, pending);
         }
-        const r = await pending;
-        return 'pid' in r ? { host: r } : { refusal: r };
+        try {
+            const r = await pending;
+            return 'pid' in r ? { host: r } : { refusal: r };
+        } finally {
+            if (onProgress) listeners.delete(onProgress);
+        }
     }
 
-    private async startHost(ws: Workspace, mode: EngineMode, temporary: boolean): Promise<HostRecord | ResultBody> {
+    private async startHost(ws: Workspace, requested: EngineMode, temporary: boolean): Promise<HostRecord | ResultBody> {
         if (!ws.engine) return refused('engine-not-found', `Cannot start an engine: ${ws.engineProblem ?? 'the engine was not found'}.`, ['Call dream_workspace add with engineRoot set, or fix EngineAssociation in the .uproject.']);
         if (!ws.engine.editorCmdExists)
             return refused('engine-not-found', `Cannot start an engine: ${ws.engine.editorCmd} does not exist.`, ['Build the editor for this engine, or point engineRoot at an installed engine.']);
-        const owner = ws.discovery.active.find(p => p.manifest!.host);
-        if (!owner)
-            return refused('no-host', 'No plugin in this project declares a host commandlet, so dream-mcp cannot start an engine for it.', ['Open the project in the editor and retry.']);
+        const owner = hostLaunch(ws, requested, 0, 0).owner;
+        if (!owner) return refused('no-plugins', 'No Dream plugin with a manifest is active in this project, so there is nothing for an engine host to serve.', ['Call dream_workspace status.']);
 
         const lock = await this.takeStartLock(ws);
         if (!lock) {
@@ -366,20 +431,12 @@ export class EngineManager {
         try {
             const port = ws.config.port ?? (await freePort());
             const token = randomBytes(24).toString('hex');
-            const commandlet = owner.manifest!.host!.commandlet;
-            const args = [
-                ws.uproject,
-                `-run=${commandlet}`,
-                `-DreamMCPPort=${port}`,
-                '-unattended',
-                '-nosplash',
-                '-nopause',
-                '-stdout',
-                mode === 'render' ? '-AllowCommandletRendering' : '-nullrhi',
-            ];
+            const launch = hostLaunch(ws, requested, port, process.pid);
+            const { mode, commandlet } = launch;
+            if (launch.fallback) this.log(launch.fallback);
             // The token goes in the environment, not on the command line, where any local
             // process could read it from the process list.
-            const proc = this.launcher.spawn(ws.engine.editorCmd, args, { cwd: ws.dir, env: { [TOKEN_ENV]: token } });
+            const proc = this.launcher.spawn(ws.engine.editorCmd, launch.args, { cwd: ws.dir, env: { [TOKEN_ENV]: token } });
             const key = EngineManager.key(ws);
             const host: HostRecord = {
                 key,
@@ -393,7 +450,7 @@ export class EngineManager {
                 temporary,
                 ownerId: owner.manifest!.id,
                 ownerRoute: owner.manifest!.route,
-                commandlet,
+                ...(commandlet ? { commandlet } : {}),
                 pluginIds: ws.discovery.active.map(p => p.manifest!.id),
                 idleMinutes: ws.config.engine.idleMinutes,
                 proc,
@@ -423,7 +480,20 @@ export class EngineManager {
             this.hosts.set(key, host);
             this.log(`started ${mode} host pid ${proc.pid} on port ${port} for ${ws.uproject}`);
 
-            const ownerEp = await this.helloOn(host, owner, this.timings.startMs);
+            // A windowless editor's first start (compiling and cache warm-up) can take minutes;
+            // keep telling whoever waits that it is still coming.
+            const what = mode === 'render' ? 'a windowless editor' : `the ${commandlet} commandlet`;
+            const ticker = setInterval(() => {
+                const elapsed = this.now() - host.startedAt;
+                for (const l of this.startListeners.get(key) ?? []) l(`Starting the engine host (${what}): ${Math.round(elapsed / 1000)} s so far.`, elapsed);
+            }, this.timings.startNoteMs);
+            ticker.unref();
+            let ownerEp: Endpoint | undefined;
+            try {
+                ownerEp = await this.helloOn(host, owner, this.timings.startMs);
+            } finally {
+                clearInterval(ticker);
+            }
             if (!ownerEp) {
                 const tail = host.logs.slice(-20).join('\n');
                 const exited = host.exitCode !== undefined;
@@ -432,8 +502,12 @@ export class EngineManager {
                     'engine-error',
                     exited
                         ? `The engine host exited with code ${host.exitCode} before its endpoint answered.`
-                        : `The engine host did not answer within ${Math.round(this.timings.startMs / 1000)} s and was stopped.`,
-                    ['dream_engine logs shows the full output.', 'dream_workspace doctor checks the engine and manifests.'],
+                        : `The engine host (${what}) did not answer within ${Math.round(this.timings.startMs / 1000)} s and was stopped.`,
+                    [
+                        'dream_engine logs shows the full output.',
+                        'dream_workspace doctor checks the engine and manifests.',
+                        ...(exited ? [] : ['A first start can take several minutes while the engine compiles and warms its caches; raise DREAM_MCP_START_TIMEOUT_MS, or open the project in the editor once, then retry.']),
+                    ],
                     { log: tail },
                 );
             }
@@ -592,3 +666,13 @@ export async function freePort(preferred = DEFAULT_PORT): Promise<number> {
 }
 
 export { endpointOf };
+
+/** The host form a project's setting really gets: headless needs a plugin with a host commandlet. */
+export function effectiveMode(ws: Workspace): EngineMode {
+    return hostLaunch(ws, ws.config.engine.mode, 0, 0).mode;
+}
+
+/** Why the setting is not honoured, if it is not. */
+export function modeFallback(ws: Workspace): string | undefined {
+    return hostLaunch(ws, ws.config.engine.mode, 0, 0).fallback;
+}

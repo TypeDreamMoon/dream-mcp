@@ -89,7 +89,7 @@ Registered workspaces and their settings live in `~/.dream-mcp/workspaces.json`:
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `mode` | `render` | `render`: the background host can render (previews work). `headless`: no rendering, less memory; actions that need rendering get a temporary rendering process. |
+| `mode` | `render` | `render`: the background host is a windowless editor and can render (previews work); its first start is the slower one. `headless`: a host commandlet without rendering, less memory; actions that need rendering get a temporary windowless editor. Needs a plugin that declares a host commandlet, otherwise it falls back to `render`. |
 | `idleMinutes` | `15` | Stop the background host after this long without calls. |
 | `engineRoot` | from `.uproject` | Use this engine instead of the one `EngineAssociation` names. |
 | `port` | free port | Port for the background host. |
@@ -165,8 +165,10 @@ content.
    the `DREAM_MCP_TOKEN` environment variable first (that is how dream-mcp passes it to a
    host it starts; it never puts the token on the command line), then `-DreamMCPToken=`.
    Write the discovery file on start.
-3. Optionally provide a host commandlet that keeps ticking so the endpoint is available
-   without an editor.
+3. Honour `-DreamMCPHost`: publish `mode: "host"`, accept `/shutdown`, and exit when the
+   process named by `-DreamMCPParentPid` goes away. That is all a windowless editor needs to
+   act as the rendering host. Optionally provide a host commandlet that keeps ticking, for
+   the headless form (see [docs/protocol.md](docs/protocol.md#3-host-processes)).
 
 The full contract is in [docs/protocol.md](docs/protocol.md). The test suite's fake endpoint
 (`test/fake/endpoint.ts`) is a working reference implementation, and the contract tests check

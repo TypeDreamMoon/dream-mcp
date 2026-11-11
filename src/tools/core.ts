@@ -2,7 +2,7 @@ import path from 'node:path';
 import type { CallToolResult } from '@modelcontextprotocol/server';
 import { DEFAULT_IDLE_MINUTES, SERVER_VERSION } from '../config.js';
 import type { Probe } from '../engine/discovery.js';
-import type { EngineManager } from '../engine/manager.js';
+import { modeFallback, type EngineManager } from '../engine/manager.js';
 import { renderResult, textResult } from './format.js';
 import { refused } from '../protocol/types.js';
 import { exists } from '../util/fs.js';
@@ -20,7 +20,7 @@ export const WORKSPACE_DESCRIPTION = [
     '- status(): current project, how it was chosen, engine, Dream plugins found and their tools.',
     '- list(): registered workspaces.',
     '- use(project*: string): switch to a project (.uproject path, its folder, or a registered name) for this session; the plugin tools change to match.',
-    '- add(project*: string, name?: string, mode?: render|headless, idleMinutes?: number, engineRoot?: string, port?: integer): register a project or change its settings. mode render (default) keeps a host that can render; headless uses less memory and starts a render process only when needed.',
+    '- add(project*: string, name?: string, mode?: render|headless, idleMinutes?: number, engineRoot?: string, port?: integer): register a project or change its settings. mode render (default) keeps a windowless editor that can render previews; headless runs a commandlet without rendering (less memory) and starts a rendering process only for actions that need it.',
     '- remove(project*: string): forget a registered project.',
     '- doctor(): check Node, engine, manifests and endpoints, and say what to fix.',
 ].join('\n');
@@ -91,7 +91,9 @@ export class CoreTools {
         const lines = [`Project: ${ws.name} (${ws.uproject})`, `Chosen by: ${ws.chosenBy}${ws.registered ? '' : ' (not registered; defaults apply)'}`];
         if (ws.engine) lines.push(`Engine: ${ws.engine.version ?? 'unknown version'} at ${ws.engine.root} (${ws.engine.via})${ws.engine.editorCmdExists ? '' : ' -- UnrealEditor-Cmd is missing'}`);
         else lines.push(`Engine: not found -- ${ws.engineProblem}`);
-        lines.push(`Engine host: mode ${ws.config.engine.mode}, idle shutdown after ${ws.config.engine.idleMinutes} min${ws.config.port ? `, port ${ws.config.port}` : ''}`);
+        lines.push(`Engine host: mode ${ws.config.engine.mode} (${ws.config.engine.mode === 'render' ? 'a windowless editor' : 'a commandlet without rendering'}), idle shutdown after ${ws.config.engine.idleMinutes} min${ws.config.port ? `, port ${ws.config.port}` : ''}`);
+        const fallback = modeFallback(ws);
+        if (fallback) lines.push(`Note: ${fallback}`);
         const tools: string[] = [];
         if (!ws.discovery.plugins.length) lines.push('Dream plugins: none with a Resources/DreamMCP.json manifest, so there are no plugin tools.');
         else {
@@ -190,6 +192,8 @@ export class CoreTools {
             if (!ws.engine) checks.push({ ok: false, what: `Engine not found: ${ws.engineProblem}`, fix: 'Call dream_workspace add with engineRoot.' });
             else {
                 checks.push({ ok: true, what: `Engine ${ws.engine.version ?? '?'} at ${ws.engine.root} (${ws.engine.via})` });
+                const fallback = modeFallback(ws);
+                if (fallback) checks.push({ ok: true, what: `  note: ${fallback}` });
                 checks.push({ ok: ws.engine.editorCmdExists, what: `UnrealEditor-Cmd at ${ws.engine.editorCmd}`, fix: 'Build the editor target or use an installed engine.' });
             }
             if (!ws.discovery.plugins.length) checks.push({ ok: false, what: 'No Dream plugin manifests (Plugins/**/Resources/DreamMCP.json)', fix: 'Install a Dream plugin that ships a manifest.' });
@@ -233,14 +237,14 @@ export class CoreTools {
             case 'status':
                 return this.engineStatus(ws);
             case 'start':
-                return this.start(ws, args);
+                return this.start(ws, args, ctx);
             case 'stop': {
                 const h = await this.engine.stop(ws, 'dream_engine stop');
                 return textResult(h ? `Stopped the engine host (pid ${h.pid}).` : 'This server has no engine host running for this project. (An open editor is never stopped.)');
             }
             case 'restart': {
                 const h = await this.engine.stop(ws, 'dream_engine restart');
-                const r = await this.start(ws, args);
+                const r = await this.start(ws, args, ctx);
                 return h ? { ...r, content: [{ type: 'text', text: `Stopped pid ${h.pid}.` }, ...r.content] } : r;
             }
             case 'logs': {
@@ -275,7 +279,7 @@ export class CoreTools {
         });
     }
 
-    private async start(ws: Workspace, args: Record<string, unknown>): Promise<CallToolResult> {
+    private async start(ws: Workspace, args: Record<string, unknown>, ctx: CallContext): Promise<CallToolResult> {
         const mode = args.mode === undefined ? ws.config.engine.mode : args.mode;
         if (mode !== 'render' && mode !== 'headless') return renderResult(refused('bad-args', 'mode must be "render" or "headless".'));
         const probes = await this.engine.probeAll(ws);
@@ -287,7 +291,7 @@ export class CoreTools {
         const own = this.engine.host(ws);
         if (other && other.state === 'alive' && (!own || own.pid !== other.disc.pid)) return textResult(`An engine host started by another dream-mcp (pid ${other.disc.pid}) already serves this project.`);
         const t0 = Date.now();
-        const r = await this.engine.ensureHost(ws, mode, false);
+        const r = await this.engine.ensureHost(ws, mode, false, ctx.progress ? (message, ms) => ctx.progress!(Math.round(ms / 1000), undefined, message) : undefined);
         if ('refusal' in r) return renderResult(r.refusal);
         const h = r.host;
         const secs = ((Date.now() - t0) / 1000).toFixed(1);

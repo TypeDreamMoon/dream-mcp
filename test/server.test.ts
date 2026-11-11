@@ -192,7 +192,7 @@ test('cold start: the first call starts a host and says how long it took', async
     const c = await connect(p);
     try {
         const r = await c.call('dream_demo', 'echo', { text: 'cold' });
-        assert.match(c.text(r), /Note: Started the engine host \(render, pid \d+\) in [\d.]+ s/);
+        assert.match(c.text(r), /Note: Started the engine host \(render, a windowless editor, pid \d+\) in [\d.]+ s/);
         assert.equal(c.launcher.spawned.length, 1);
         const status = await c.call('dream_engine', 'status');
         assert.match(c.text(status), /Host started by this server: pid \d+, render/);
@@ -298,6 +298,87 @@ test('workspace add / list / remove and doctor', async () => {
         assert.match(c.text(doc), /ok {3}Endpoint demo: not running/);
         assert.match(c.text(await c.call('dream_workspace', 'remove', { project: 'Mine' })), /Removed Mine/);
         assert.match(c.text(await c.call('dream_workspace', 'list')), /No registered workspaces/);
+    } finally {
+        await c.done();
+        await p.cleanup();
+    }
+});
+
+test('headless project through the tools: a render action stops the resident host and runs in a temporary rendering editor', async () => {
+    const p = await makeProject({ fixtures: ['DemoPlugin'] });
+    const c = await connect(p);
+    try {
+        await c.call('dream_workspace', 'add', { project: p.uproject, mode: 'headless' });
+        const echo = await c.call('dream_demo', 'echo', { text: 'warm' });
+        assert.match(c.text(echo), /Started the engine host \(headless, pid \d+\)/);
+        const resident = c.launcher.spawned[0]!;
+        assert.ok(resident.args.includes('-run=DemoHost') && resident.args.includes('-nullrhi'));
+
+        const snap = await c.call('dream_demo', 'snap', { file: 'Demo/a.dmo' });
+        assert.equal(snap.isError, undefined, c.text(snap));
+        assert.equal(snap.content.find(x => x.type === 'image')?.mimeType, 'image/png');
+        assert.match(c.text(snap), /headless, so "snap" ran in a separate rendering process \(a windowless editor\)/);
+        assert.equal((snap.structuredContent!.engine as { via: string }).via, 'temp-render');
+        const temp = c.launcher.spawned[1]!;
+        assert.ok(temp.args.includes('-RenderOffscreen') && !temp.args.some(a => a.startsWith('-run=')));
+        await waitFor(() => resident.proc.exitCode !== undefined && temp.proc.exitCode !== undefined, 5000, 'both hosts exit');
+        assert.deepEqual(c.launcher.killed, []);
+    } finally {
+        await c.done();
+        await p.cleanup();
+    }
+});
+
+test('a headless host another dream-mcp started: render actions are refused with the reason and the way out', async () => {
+    const p = await makeProject({ fixtures: ['DemoPlugin'] });
+    const other = new FakeEngine({ projectDir: p.dir, mode: 'host', render: false });
+    other.addPlugin((await demoManifest()) as unknown as FakeManifest, demoBehaviors(other));
+    await other.start();
+    const c = await connect(p);
+    try {
+        const r = await c.call('dream_demo', 'snap', { file: 'Demo/a.dmo' });
+        assert.equal(r.isError, true);
+        assert.match(c.text(r), /\[refused: render-unavailable\]/);
+        assert.match(c.text(r), /another dream-mcp process started/);
+        assert.match(c.text(r), /call dream_engine stop/);
+        assert.equal(c.launcher.spawned.length, 0);
+        // Non-rendering actions still use that host.
+        assert.match(c.text(await c.call('dream_demo', 'echo', { text: 'x' })), /^echo: x/);
+    } finally {
+        await c.done();
+        await other.stop();
+        await p.cleanup();
+    }
+});
+
+test('a slow engine start keeps sending progress notifications', async () => {
+    const p = await makeProject({ fixtures: ['DemoPlugin'] });
+    const c = await connect(p);
+    try {
+        c.launcher.env = { FAKE_HOST_DELAY_MS: '600' };
+        const seen: { progress: number; message?: string }[] = [];
+        const r = (await c.client.callTool(
+            { name: 'dream_demo', arguments: { action: 'echo', args: { text: 'slow' } } },
+            { onprogress: (pr: { progress: number; message?: string }) => seen.push(pr) } as never,
+        )) as unknown as ToolResult;
+        assert.match(c.text(r), /^echo: slow/);
+        assert.ok(seen.some(s => /Starting the engine host \(a windowless editor\)/.test(s.message ?? '')), JSON.stringify(seen));
+        for (let i = 1; i < seen.length; i++) assert.ok(seen[i]!.progress > seen[i - 1]!.progress, 'progress increases');
+    } finally {
+        await c.done();
+        await p.cleanup();
+    }
+});
+
+test('status and doctor say when headless falls back to rendering', async () => {
+    const demo = await demoManifest();
+    const { host: _host, ...noHost } = demo;
+    const p = await makeProject({ plugins: [{ name: 'DemoPlugin', manifest: noHost }] });
+    const c = await connect(p);
+    try {
+        await c.call('dream_workspace', 'add', { project: p.uproject, mode: 'headless' });
+        assert.match(c.text(await c.call('dream_workspace', 'status')), /Note: No plugin in this project declares a host commandlet/);
+        assert.match(c.text(await c.call('dream_workspace', 'doctor')), /note: No plugin in this project declares a host commandlet/);
     } finally {
         await c.done();
         await p.cleanup();

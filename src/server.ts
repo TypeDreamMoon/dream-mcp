@@ -42,14 +42,22 @@ type Ctx = { mcpReq: { signal: AbortSignal; _meta?: { progressToken?: string | n
 
 function callContext(ctx: Ctx | undefined): CallContext {
     const token = ctx?.mcpReq?._meta?.progressToken;
+    // MCP requires progress to increase. Engine start-up (seconds) and job progress
+    // (percent) are different scales, so keep the value monotonic and drop `total` when
+    // it had to be bumped.
+    let last = -1;
     return {
         ...(ctx?.mcpReq?.signal ? { signal: ctx.mcpReq.signal } : {}),
         ...(token !== undefined
             ? {
-                  progress: (progress, total, message) =>
+                  progress: (raw, rawTotal, message) => {
+                      const progress = raw > last ? raw : last + 0.01;
+                      const total = progress === raw ? rawTotal : undefined;
+                      last = progress;
                       void ctx!.mcpReq
                           .notify({ method: 'notifications/progress', params: { progressToken: token, progress, ...(total !== undefined ? { total } : {}), ...(message ? { message } : {}) } })
-                          .catch(() => undefined),
+                          .catch(() => undefined);
+                  },
               }
             : {}),
     };

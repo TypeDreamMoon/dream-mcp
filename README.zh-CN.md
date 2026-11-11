@@ -83,7 +83,7 @@ claude mcp add dream -- npx -y <克隆目录的路径>
 
 | 设置 | 默认 | 含义 |
 |---|---|---|
-| `mode` | `render` | `render`:后台宿主能渲染(预览可用)。`headless`:不渲染、省内存;要渲染的动作临时另起一个能渲染的进程。 |
+| `mode` | `render` | `render`:后台宿主是无窗口的完整编辑器,能渲染(预览可用),首次启动较慢。`headless`:不渲染的宿主 commandlet,省内存;要渲染的动作临时另起一个无窗口编辑器。需要有插件声明宿主 commandlet,否则退回 `render`。 |
 | `idleMinutes` | `15` | 后台宿主空闲这么久就关。 |
 | `engineRoot` | 取自 `.uproject` | 用这个引擎,而不是 `EngineAssociation` 指的那个。 |
 | `port` | 空闲端口 | 后台宿主的端口。 |
@@ -147,7 +147,9 @@ claude mcp add dream -- npx -y <克隆目录的路径>
 2. 在插件的编辑器模块里实现端点:`hello`、`call`、`jobs`、`cancel`,宿主还要 `shutdown`;
    只监听 127.0.0.1 并校验令牌。令牌先读环境变量 `DREAM_MCP_TOKEN`(dream-mcp 起宿主时
    就是这样传的,绝不放命令行),其次 `-DreamMCPToken=`。启动时写发现文件。
-3. 可选:提供一个持续 tick 的宿主 commandlet,让没开编辑器时也有端点可用。
+3. 让端点认 `-DreamMCPHost`:发布 `mode: "host"`、接受 `/shutdown`、`-DreamMCPParentPid` 指的进程没了就退出。
+   无窗口编辑器当渲染宿主只需要这一条。可选:再提供一个持续 tick 的宿主 commandlet,用于 headless 形态
+   (见 [docs/protocol.md](docs/protocol.md#3-host-processes))。
 
 完整契约见 [docs/protocol.md](docs/protocol.md)(英文)。测试里的假端点
 (`test/fake/endpoint.ts`)就是一份能跑的参考实现,契约测试拿真端点和它对照:

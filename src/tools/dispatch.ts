@@ -84,7 +84,7 @@ export class Dispatcher {
     private async remote(ws: Workspace, plugin: FoundPlugin, spec: ActionSpec, args: Record<string, unknown>, ctx: CallContext, finish: (r: CallToolResult) => void): Promise<void> {
         const m = plugin.manifest!;
         const tool = `dream_${m.id}`;
-        const got = await this.engine.acquire(ws, plugin, spec);
+        const got = await this.engine.acquire(ws, plugin, spec, ctx.progress ? (message, ms) => ctx.progress!(Math.round(ms / 1000), undefined, message) : undefined);
         if ('refusal' in got) return finish(await renderResult(got.refusal));
         const lease = got.lease;
         try {

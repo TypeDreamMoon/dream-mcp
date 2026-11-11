@@ -33,6 +33,8 @@ export interface Timings {
     startMs: number;
     /** How long to wait for a host to exit after `/shutdown` before killing it. */
     stopMs: number;
+    /** How often a starting host reports that it is still starting. */
+    startNoteMs: number;
     /** Idle check interval. */
     tickMs: number;
 }
@@ -49,6 +51,7 @@ export function defaultTimings(env: NodeJS.ProcessEnv = process.env): Timings {
         pollMs: 200,
         startMs: num('DREAM_MCP_START_TIMEOUT_MS', 600_000),
         stopMs: 30_000,
+        startNoteMs: 5000,
         tickMs: 30_000,
     };
 }

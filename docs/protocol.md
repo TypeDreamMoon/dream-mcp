@@ -6,7 +6,7 @@ two parts:
 1. a **capability manifest**, a static JSON file shipped with the plugin, readable without
    an engine;
 2. an **endpoint**, a set of HTTP routes (and optionally a WebSocket) inside the plugin's
-   editor module, served by the editor or by a resident host commandlet.
+   editor module, served by the editor or by a host process dream-mcp starts (section 3).
 
 dream-mcp contains no plugin-specific code. Everything it knows about a plugin comes from
 these two parts.
@@ -55,7 +55,7 @@ Path: `<Plugin>/Resources/DreamMCP.json`. Ship `Resources/` with the plugin.
 | `plugin` | Plugin name, matching the `.uplugin` file name. |
 | `title`, `description` | Shown to the model. English. Keep the description to one paragraph. |
 | `route` | HTTP route prefix, starts with `/`, no trailing `/`. |
-| `host.commandlet` | The resident host commandlet (section 3). Optional; without it engine actions only work while the editor is open. |
+| `host.commandlet` | The commandlet for the headless host form (section 3). Optional; the rendering host form (a windowless editor) needs none. |
 | `extensions`, `sourceRoots` | Where the plugin's sources live; shown in the tool description. |
 | `reference` | Docs (paths relative to the plugin root) exposed as MCP resources and through the built-in `reference` action. |
 | `actions` | The plugin's actions (below). |
@@ -109,7 +109,7 @@ Path: `<Plugin>/Resources/DreamMCP.json`. Ship `Resources/` with the plugin.
   "render": true, "engine": "5.8.4", "plugin": "2.2.0", "startedAt": "2026-11-12T10:00:00Z" }
 ```
 
-`mode` is `editor` (a user's editor) or `host` (the resident commandlet). `ws` is `null`
+`mode` is `editor` (a user's editor) or `host` (a process started with `-DreamMCPHost`, section 3). `ws` is `null`
 when there is no WebSocket. Write it by writing a temporary file and renaming it over the
 target.
 
@@ -182,23 +182,43 @@ project is still held by something.
 - Large outputs such as images go to `<Project>/Saved/DreamMCP/artifacts/`; the result gives
   the relative path, and the server returns images as MCP image content.
 
-## 3. Resident host
+## 3. Host processes
 
-- Each plugin may provide a commandlet (`host.commandlet`) that does not exit: its main loop
-  keeps ticking the game thread (HTTP listeners and async work depend on it), and it exits
-  on `/shutdown` or when its parent process goes away. Other Dream plugins in the same
-  process register their endpoints from their own module startup.
-- The server starts the host of the **first** plugin (project plugins by name, then engine
-  plugins) that declares one, directly (no shell), and records its pid:
+When no editor serves the project, the server starts a **host**: an Unreal process it owns,
+started directly (no shell), whose pid it records. There are two forms, chosen by the
+project's `engine.mode` setting and fixed by the protocol (not by manifests):
 
 ```
-DREAM_MCP_TOKEN=<t>   (environment)
-UnrealEditor-Cmd <uproject> -run=<Host> -DreamMCPPort=<p> -unattended -nosplash -nopause -stdout
-   render mode adds:   -AllowCommandletRendering
-   headless mode adds: -nullrhi
+environment:  DREAM_MCP_TOKEN=<t>
+
+render (default) - a windowless full editor, which can render previews:
+UnrealEditor-Cmd <uproject> -DreamMCPHost -RenderOffscreen -unattended -nosplash -nosound -DreamMCPPort=<p> -DreamMCPParentPid=<pid>
+
+headless - a host commandlet without rendering:
+UnrealEditor-Cmd <uproject> -run=<host.commandlet> -nullrhi -DreamMCPHost -unattended -nosplash -nopause -DreamMCPPort=<p> -DreamMCPParentPid=<pid>
 ```
 
-The token is never put on the command line.
+dream-mcp also appends `-stdout` (it keeps the output for `dream_engine logs`). The token is
+never put on the command line.
+
+- **`-DreamMCPHost`** is a switch every Dream endpoint understands. With it the endpoint
+  publishes `mode: "host"`, accepts `/shutdown`, and exits when its parent process goes away.
+  Without it the endpoint is `mode: "editor"`.
+- **`-DreamMCPParentPid=<pid>`** names the process to watch (dream-mcp passes its own pid);
+  `0` turns the watch off (for a host started by hand). Without the flag the endpoint watches
+  the process that started it.
+- **render** needs no `-run=`: the editor's own engine loop keeps the endpoint ticking.
+  Commandlets cannot render previews (their preview scenes come out empty), which is why the
+  rendering form is an editor.
+- **headless** runs the `host.commandlet` of the **first** plugin (project plugins by name,
+  then engine plugins) that declares one. Its main loop must keep ticking the game thread
+  (HTTP listeners and async work depend on it). Other Dream plugins in the same process
+  register their endpoints from their own module startup. If no plugin declares a
+  commandlet, a headless setting falls back to the render form, and `dream_workspace status`
+  and `doctor` say so.
+- A windowless editor's first start (shader compilation, DDC warm-up) is slower than a
+  commandlet's. While a host starts, dream-mcp sends MCP progress notifications every few
+  seconds and waits up to `DREAM_MCP_START_TIMEOUT_MS` (default 10 minutes).
 
 ## 4. How the server routes a call
 
@@ -220,7 +240,7 @@ shut down. A host is shut down after `engine.idleMinutes` without calls and when
 exits. A host that ignores `/shutdown` is killed by the pid recorded when it was started;
 nothing is ever killed by name.
 
-A headless project runs `needs: "render"` actions in a separate rendering process started
+A headless project runs `needs: "render"` actions in a separate rendering host (a windowless editor) started
 for that one call (the headless host is stopped first, since both would write the same
 discovery files), and the result's `next` explains why it was slow.
 
@@ -233,6 +253,6 @@ discovery files), and the result's `next` explains why it was slow.
 | `editor-without-endpoint` | An editor holds the project without this plugin's endpoint; write refused. |
 | `plugin-not-loaded` | A host runs but this plugin has no endpoint in it. |
 | `render-unavailable` | The serving process cannot render and another one cannot be started safely. |
-| `engine-not-found`, `no-host` | No engine to start, or no plugin declares a host commandlet. |
+| `engine-not-found`, `no-plugins` | No engine to start, or no active plugin for a host to serve. |
 | `bad-token` | The endpoint rejected the token (stale discovery file). |
 | `not-found`, `unknown-job`, `cancelled`, `no-workspace` | As named. |
