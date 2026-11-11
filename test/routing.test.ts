@@ -228,19 +228,23 @@ test('a discovery file whose pid is gone, or now belongs to a non-Unreal program
     }
 });
 
-test('an editor without an endpoint: writes refused, read-only actions may start a host', async () => {
+test('an editor without an endpoint: writes wait for it, then are refused; read-only actions may start a host', async () => {
     const t = await setup();
+    const editorProc = dummyProcess();
     try {
-        t.launcher.projectProcs = [{ pid: 424242, name: 'UnrealEditor.exe' }];
+        t.launcher.projectProcs = [{ pid: editorProc.pid, name: 'UnrealEditor.exe' }];
+        const t0 = Date.now();
         const r = refusal(await t.mgr.acquire(t.ws, t.plugin, t.action('build')));
+        assert.ok(Date.now() - t0 >= 500, 'waited for the endpoint first');
         assert.equal(r.reason, 'editor-without-endpoint');
-        assert.match(r.summary, /UnrealEditor\.exe \(pid 424242\)/);
+        assert.match(r.summary, new RegExp(`UnrealEditor\\.exe \\(pid ${editorProc.pid}\\) has this project open, or is still opening it`));
         assert.equal(t.launcher.spawned.length, 0);
 
         const l = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('echo')));
         assert.equal(l.via, 'host');
         await l.release();
     } finally {
+        editorProc.kill();
         await t.done();
     }
 });
@@ -472,4 +476,117 @@ test('the real launcher hands secrets to the child through the environment', asy
     await new Promise<void>(r => proc.onExit(() => r()));
     await waitFor(() => lines.some(l => l.startsWith('token=')), 5000, 'child output');
     assert.ok(lines.includes('token=abc123 argv=1'), lines.join('|'));
+});
+
+test('a temporary rendering process on its way out is never leased again (headless, render then read)', async () => {
+    const t = await setup({ config: { mode: 'headless' } });
+    try {
+        await lease(await t.mgr.acquire(t.ws, t.plugin, t.action('echo'))).release();
+        const snap = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('snap')));
+        const tempPid = snap.pid;
+        assert.equal(snap.via, 'temp-render');
+        // What the dispatcher does: release, and route the next call straight away.
+        const released = snap.release();
+        const next = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('build')));
+        assert.notEqual(next.pid, tempPid, 'served by the temporary process that is shutting down');
+        assert.equal(next.via, 'host');
+        assert.equal(next.endpoint.render, false, 'back on a headless host');
+        // And a long job on it runs to the end.
+        const call = await new EndpointClient(next.endpoint, fastTimings()).call('j', 'build', { file: 'Demo/a.dmo', steps: 3, stepMs: 30 });
+        assert.equal(call.kind, 'job');
+        if (call.kind === 'job') assert.equal((await new EndpointClient(next.endpoint, fastTimings()).waitJob(call.job, { deadlineMs: 5000 })).status.state, 'done');
+        await next.release();
+        await released;
+        assert.deepEqual(t.launcher.killed, []);
+    } finally {
+        await t.done();
+    }
+});
+
+test('a host that just died is restarted, not reported as "plugin not loaded"', async () => {
+    const t = await setup();
+    try {
+        await lease(await t.mgr.acquire(t.ws, t.plugin, t.action('echo'))).release();
+        const first = t.launcher.spawned[0]!;
+        process.kill(first.pid, 'SIGKILL'); // a crash; the exit event has not been seen yet
+        const l = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('echo')));
+        assert.equal(l.via, 'host');
+        assert.notEqual(l.pid, first.pid);
+        assert.equal(t.launcher.spawned.length, 2);
+        await l.release();
+    } finally {
+        await t.done();
+    }
+});
+
+test('an editor opening the project while our host runs: a write waits for its endpoint and goes to it', async () => {
+    const t = await setup();
+    const editorProc = dummyProcess();
+    try {
+        await lease(await t.mgr.acquire(t.ws, t.plugin, t.action('echo'))).release();
+        const host = t.launcher.spawned[0]!;
+        // The editor process exists and names the project, but has no endpoint yet.
+        t.launcher.projectProcs = [{ pid: editorProc.pid, name: 'UnrealEditor.exe' }];
+        await new Promise(r => setTimeout(r, 250)); // let the background refresh see it
+        setTimeout(() => void t.editor({ pid: editorProc.pid }), 300);
+        const w = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('build')));
+        assert.equal(w.via, 'editor');
+        assert.equal(w.pid, editorProc.pid);
+        assert.match(w.notes.join(), /was opening this project; waited [\d.]+ s for its endpoint/);
+        await w.release();
+        await waitFor(() => host.proc.exitCode !== undefined, 5000, 'our host retires');
+        assert.deepEqual(t.launcher.killed, []);
+    } finally {
+        editorProc.kill();
+        await t.done();
+    }
+});
+
+test('an editor that never publishes an endpoint: our host refuses writes after the wait, reads still run', async () => {
+    const t = await setup({ timings: { editorWaitMs: 400 } });
+    const editorProc = dummyProcess();
+    try {
+        await lease(await t.mgr.acquire(t.ws, t.plugin, t.action('echo'))).release();
+        t.launcher.projectProcs = [{ pid: editorProc.pid, name: 'UnrealEditor.exe' }];
+        await new Promise(r => setTimeout(r, 250));
+        const r = refusal(await t.mgr.acquire(t.ws, t.plugin, t.action('poke')));
+        assert.equal(r.reason, 'editor-without-endpoint');
+        assert.match(r.next.join(' '), /still loading, wait/);
+        const read = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('echo')));
+        assert.equal(read.via, 'host');
+        await read.release();
+        // Once that process is gone, writes run on our host again.
+        editorProc.kill();
+        await waitFor(() => !t.launcher.isAlive(editorProc.pid), 3000);
+        const again = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('poke')));
+        assert.equal(again.via, 'host');
+        await again.release();
+    } finally {
+        editorProc.kill();
+        await t.done();
+    }
+});
+
+test('the expensive command-line scan only runs when the set of Unreal processes changes', async () => {
+    const t = await setup({ timings: { holderRefreshMs: 50 } });
+    try {
+        await lease(await t.mgr.acquire(t.ws, t.plugin, t.action('echo'))).release();
+        for (let i = 0; i < 5; i++) await (lease(await t.mgr.acquire(t.ws, t.plugin, t.action('poke')))).release();
+        await new Promise(r => setTimeout(r, 300)); // several background refreshes
+        // Only our own host is running, so there was never anything to scan.
+        assert.equal(t.launcher.projectScans, 0);
+        const other = dummyProcess();
+        try {
+            t.launcher.projectProcs = [{ pid: other.pid, name: 'UnrealEditor.exe' }];
+            await new Promise(r => setTimeout(r, 300));
+            const scans = t.launcher.projectScans;
+            assert.ok(scans >= 1, 'a new Unreal process triggers one scan');
+            await new Promise(r => setTimeout(r, 300));
+            assert.equal(t.launcher.projectScans, scans, 'an unchanged process set is not scanned again');
+        } finally {
+            other.kill();
+        }
+    } finally {
+        await t.done();
+    }
 });

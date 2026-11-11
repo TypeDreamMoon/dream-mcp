@@ -33,6 +33,8 @@ export interface ProcessLauncher {
     kill(pid: number): Promise<void>;
     /** Unreal processes whose command line names this project. `undefined` when the platform cannot tell. */
     projectProcesses(uproject: string): Promise<ProjectProcess[] | undefined>;
+    /** PIDs of all running Unreal editor processes, from a cheap process list (no command lines). `undefined` when it cannot tell. */
+    unrealPids(): Promise<number[] | undefined>;
     /** The executable name of a running process, or `undefined`. */
     imageName(pid: number): Promise<string | undefined>;
 }
@@ -149,6 +151,28 @@ export const nodeLauncher: ProcessLauncher = {
             if (UNREAL.test(exe) && commandLineNamesProject(m[2]!, uproject)) found.push({ pid: Number(m[1]), name: exe });
         }
         return found;
+    },
+
+    async unrealPids() {
+        if (process.platform === 'win32') {
+            // Filtered by image name: noticeably faster than a full list on a busy machine.
+            const out = await run('tasklist', ['/FO', 'CSV', '/NH', '/FI', 'IMAGENAME eq UnrealEditor*']);
+            if (out === undefined) return undefined;
+            const pids: number[] = [];
+            for (const line of out.split(/\r?\n/)) {
+                const m = /^"([^"]+)","(\d+)"/.exec(line);
+                if (m && UNREAL.test(m[1]!)) pids.push(Number(m[2]));
+            }
+            return pids;
+        }
+        const out = await run('ps', ['-eo', 'pid=,comm=']);
+        if (out === undefined) return undefined;
+        const pids: number[] = [];
+        for (const line of out.split('\n')) {
+            const m = /^\s*(\d+)\s+(.*)$/.exec(line);
+            if (m && UNREAL.test(path.basename(m[2]!.trim()))) pids.push(Number(m[1]));
+        }
+        return pids;
     },
 
     async imageName(pid) {

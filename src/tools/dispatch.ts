@@ -87,15 +87,24 @@ export class Dispatcher {
         const got = await this.engine.acquire(ws, plugin, spec, ctx.progress ? (message, ms) => ctx.progress!(Math.round(ms / 1000), undefined, message) : undefined);
         if ('refusal' in got) return finish(await renderResult(got.refusal));
         const lease = got.lease;
+        // Give the lease back *before* the caller sees the result: releasing is what marks a
+        // temporary or retiring process as stopping, and the caller's next call must not be
+        // routed to a process that is on its way out.
+        const deliver = async (r: CallToolResult | Promise<CallToolResult>) => {
+            const out = await r;
+            const released = lease.release();
+            finish(out);
+            await released;
+        };
         try {
             const client = new EndpointClient(lease.endpoint, this.engine.timings);
             let reply;
             try {
                 reply = await client.call(randomUUID(), spec.name, args, ctx.signal);
             } catch (error) {
-                return finish(await renderResult(transportFailure(error as Error, spec.name), { projectDir: ws.dir, notes: lease.notes }));
+                return deliver(renderResult(transportFailure(error as Error, spec.name), { projectDir: ws.dir, notes: lease.notes }));
             }
-            if (reply.kind === 'result') return finish(await this.render(ws, reply.result, lease));
+            if (reply.kind === 'result') return deliver(this.render(ws, reply.result, lease));
 
             const tracked: TrackedJob = {
                 job: reply.job,
@@ -121,14 +130,16 @@ export class Dispatcher {
                     await this.settle(client, tracked);
                     return;
                 }
-                return finish(await renderResult(transportFailure(error as Error, spec.name), { projectDir: ws.dir, notes: lease.notes }));
+                // The job is over as far as anyone can tell (usually: the engine went away).
+                tracked.result = transportFailure(error as Error, spec.name);
+                return deliver(renderResult(tracked.result, { projectDir: ws.dir, notes: lease.notes }));
             } finally {
                 ctx.signal?.removeEventListener('abort', onAbort);
             }
             tracked.status = waited.status;
             if (!waited.timedOut) {
                 tracked.result = jobResult(waited.status, spec.name);
-                return finish(await this.render(ws, tracked.result, lease));
+                return deliver(this.render(ws, tracked.result, lease));
             }
             finish(stillRunning(tracked, waited.status));
             await this.settle(client, tracked);
@@ -161,6 +172,7 @@ export class Dispatcher {
     async job(jobId: string, ctx: CallContext): Promise<CallToolResult> {
         const t = this.jobs.get(jobId);
         if (!t) return renderResult(refused('unknown-job', `No job "${jobId}" was started by this server.`, ['Jobs are only tracked by the dream-mcp process that started them.']));
+        this.markLost(t);
         if (!t.result) {
             const timeout = new Promise<'timeout'>(r => setTimeout(() => r('timeout'), this.engine.timings.jobWaitMs).unref());
             const client = new EndpointClient(t.endpoint, this.engine.timings);
@@ -191,7 +203,17 @@ export class Dispatcher {
         }
     }
 
+    /** A job whose engine process is gone will never finish; record it as failed. */
+    private markLost(t: TrackedJob): void {
+        if (t.result || this.engine.pidAlive(t.endpoint.pid)) return;
+        t.result = makeResult('engine-error', `${t.tool} ${t.action} was lost: the engine process (pid ${t.endpoint.pid}) exited before the job finished.`, {
+            reason: 'engine-exited',
+            next: ['Run the action again; dream-mcp starts a new engine host when it is needed.'],
+        });
+    }
+
     listJobs(): TrackedJob[] {
+        for (const t of this.jobs.values()) this.markLost(t);
         return [...this.jobs.values()];
     }
 

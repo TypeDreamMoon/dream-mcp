@@ -13,7 +13,7 @@ import type { FoundPlugin } from '../workspace/plugins.js';
 import type { EngineMode } from '../workspace/registry.js';
 import type { Workspace } from '../workspace/workspace.js';
 import { discoveryFile, endpointOf, probe, type Probe } from './discovery.js';
-import type { ProcessLauncher, SpawnedProcess } from './process.js';
+import type { ProcessLauncher, ProjectProcess, SpawnedProcess } from './process.js';
 
 const LOG_LINES = 2000;
 
@@ -44,6 +44,8 @@ export interface HostRecord {
     logs: string[];
     logFile?: string;
     exitCode?: number | null;
+    /** Background refresh of "who else has this project open" while the host runs. */
+    watch?: NodeJS.Timeout;
 }
 
 export type LeaseVia = 'editor' | 'host' | 'other-host' | 'temp-render';
@@ -158,6 +160,10 @@ export class EngineManager {
         return [...this.hosts.values()];
     }
 
+    pidAlive(pid: number): boolean {
+        return this.launcher.isAlive(pid);
+    }
+
     ownPids(): Set<number> {
         return new Set([...this.hosts.values()].map(h => h.pid));
     }
@@ -195,11 +201,22 @@ export class EngineManager {
         const key = EngineManager.key(ws);
         const needRender = action.needs === 'render';
 
-        for (let attempt = 0; attempt < 3; attempt++) {
+        for (let attempt = 0; attempt < 4; attempt++) {
             const pending = this.starting.get(key);
             if (pending) await pending;
+            let own = this.hosts.get(key);
+            // A process that has died (its exit event may not have arrived yet) is forgotten,
+            // and one that is on its way out is waited for, never leased again. A temporary
+            // rendering process only serves rendering actions.
+            if (own && !this.isRunning(own)) {
+                this.forget(own);
+                own = undefined;
+            }
+            if (own && (own.stopping || own.retire || (own.temporary && !needRender))) {
+                await this.whenGone(own);
+                continue;
+            }
             const p = await this.probe(ws, id);
-            const own = this.hosts.get(key);
 
             if (p.state === 'alive') {
                 if (p.disc.mode === 'editor') {
@@ -212,7 +229,9 @@ export class EngineManager {
                 }
                 if (own && own.pid === p.disc.pid) {
                     if (needRender && own.mode !== 'render') return this.tempRender(ws, plugin, action, onProgress);
-                    return { lease: this.lease(p.endpoint, 'host', own, []) };
+                    const guard = await this.guardWrites(ws, plugin, action, onProgress);
+                    if (guard) return guard;
+                    return { lease: this.lease(p.endpoint, own.temporary ? 'temp-render' : 'host', own, []) };
                 }
                 if (needRender && !p.hello.render)
                     return refuse(
@@ -238,11 +257,19 @@ export class EngineManager {
             }
 
             // Nothing answers for this plugin.
-            if (own && !own.stopping && own.exitCode === undefined) {
+            if (own) {
                 const direct = await this.helloOn(own, plugin);
                 if (direct) {
                     if (needRender && own.mode !== 'render') return this.tempRender(ws, plugin, action, onProgress);
-                    return { lease: this.lease(direct, 'host', own, []) };
+                    const guard = await this.guardWrites(ws, plugin, action, onProgress);
+                    if (guard) return guard;
+                    return { lease: this.lease(direct, own.temporary ? 'temp-render' : 'host', own, []) };
+                }
+                // No answer from our own host: most often it has just died and the exit has not
+                // been reported yet. Give that a moment, then start a fresh one.
+                if (await this.diesSoon(own, 2000)) {
+                    this.forget(own);
+                    continue;
                 }
                 return refuse('plugin-not-loaded', `The engine host (pid ${own.pid}) is running but ${plugin.name} has no endpoint in it.`, [
                     `Check that ${plugin.name} is built for this engine and enabled, then call dream_engine restart.`,
@@ -254,6 +281,8 @@ export class EngineManager {
             if (blocker) return { refusal: blocker };
 
             if (needRender && effectiveMode(ws) === 'headless') return this.tempRender(ws, plugin, action, onProgress);
+            const guard = await this.guardWrites(ws, plugin, action, onProgress);
+            if (guard) return guard;
             const started = await this.ensureHost(ws, needRender ? 'render' : ws.config.engine.mode, false, onProgress);
             if ('refusal' in started) {
                 if (started.refusal.reason === 'host-starting-elsewhere') continue;
@@ -290,20 +319,142 @@ export class EngineManager {
         const hung = others.find(o => o.state === 'unresponsive');
         if (hung && action.writes)
             return refused('endpoint-unresponsive', `A process holds this project but does not answer: ${hung.detail}.`, ['Wait for it, or close it, then retry.']);
-
-        if (!action.writes) return undefined;
-        const known = new Set<number>(this.ownPids());
-        for (const o of others) if (o.state !== 'absent') known.add(o.disc.pid);
-        const procs = await this.launcher.projectProcesses(ws.uproject);
-        const foreign = (procs ?? []).filter(p => !known.has(p.pid));
-        if (foreign.length)
-            return refused(
-                'editor-without-endpoint',
-                `${foreign[0]!.name} (pid ${foreign[0]!.pid}) has this project open and has no DreamMCP endpoint. Writing from a second process would overwrite its work.`,
-                ['Close it, or enable the DreamMCP endpoint in it (update the plugin), then retry.', 'Read-only actions still work.'],
-                { pid: foreign[0]!.pid },
-            );
+        // Unreal processes without any endpoint are handled by guardWrites.
         return undefined;
+    }
+
+    /**
+     * Before a write runs in a process this server owns (or is about to start): is some other
+     * Unreal process opening this project? An editor takes several seconds to publish its
+     * endpoint after it starts, and writing from our host in that window would put two
+     * processes on the same packages. If one is found, wait for its endpoint and hand the
+     * call to it; give up with a refusal after `editorWaitMs`. Read-only actions pass.
+     */
+    private async guardWrites(ws: Workspace, plugin: FoundPlugin, action: ActionSpec, onProgress?: StartProgress): Promise<Acquired | undefined> {
+        if (!action.writes) return undefined;
+        const holders = await this.foreignHolders(ws);
+        if (!holders.length) return undefined;
+        const h = holders[0]!;
+        // An editor that already serves other plugins of this project, but not this one, is
+        // not going to publish this endpoint by waiting.
+        const others = [...(await this.probeAll(ws)).entries()].filter(([k]) => k !== plugin.manifest!.id).map(([, v]) => v);
+        if (others.some(o => o.state === 'alive' && o.disc.mode === 'editor' && o.disc.pid === h.pid))
+            return refuse(
+                'editor-without-endpoint',
+                `The editor (pid ${h.pid}) has this project open but ${plugin.name}'s endpoint is not running in it. Writing from a second process would overwrite the editor's work.`,
+                ['Enable the plugin and its DreamMCP endpoint in the editor (or update the plugin), then retry.', 'Read-only actions still work.'],
+                { pid: h.pid },
+            );
+        const t0 = this.now();
+        const deadline = t0 + this.timings.editorWaitMs;
+        let lastNote = t0;
+        while (this.now() < deadline) {
+            const p = await this.probe(ws, plugin.manifest!.id);
+            if (p.state === 'alive' && p.disc.mode === 'editor') {
+                const own = this.hosts.get(EngineManager.key(ws));
+                if (own) this.retireWhenIdle(own, 'the editor opened this project');
+                const secs = ((this.now() - t0) / 1000).toFixed(1);
+                return { lease: this.lease(p.endpoint, 'editor', undefined, [`An editor (pid ${p.disc.pid}) was opening this project; waited ${secs} s for its endpoint and handed the call to it.`]) };
+            }
+            if (!this.launcher.isAlive(h.pid)) {
+                this.holderCache.delete(EngineManager.key(ws));
+                return undefined;
+            }
+            if (onProgress && this.now() - lastNote >= this.timings.startNoteMs) {
+                lastNote = this.now();
+                onProgress(`Waiting for ${h.name} (pid ${h.pid}), which is opening this project, to publish its endpoint: ${Math.round((lastNote - t0) / 1000)} s so far.`, lastNote - t0);
+            }
+            await sleep(250);
+        }
+        return refuse(
+            'editor-without-endpoint',
+            `${h.name} (pid ${h.pid}) has this project open, or is still opening it, and its DreamMCP endpoint did not appear within ${Math.round(this.timings.editorWaitMs / 1000)} s. Writing from another engine process now could overwrite what that editor loads or saves.`,
+            [
+                'If the editor is still loading, wait until it has finished, then retry: it will serve the call.',
+                'If that editor has no DreamMCP endpoint (switched off, or an older plugin), close it or enable the endpoint. Read-only actions still work.',
+            ],
+            { pid: h.pid },
+        );
+    }
+
+    private readonly holderCache = new Map<string, { sig: string; checkedAt: number; scannedAt: number; holders: ProjectProcess[] }>();
+
+    /**
+     * Unreal processes, other than the ones this server started, whose command line names
+     * this project. A cheap process list runs first (at most every 2 s); the expensive
+     * command-line scan runs only when the set of Unreal processes changed.
+     */
+    private async foreignHolders(ws: Pick<Workspace, 'uproject'>, maxAgeMs = this.timings.holderRefreshMs * 1.5): Promise<ProjectProcess[]> {
+        const key = EngineManager.key(ws);
+        const own = this.ownPids();
+        const alive = (list: ProjectProcess[]) => list.filter(p => !own.has(p.pid) && this.launcher.isAlive(p.pid));
+        const cached = this.holderCache.get(key);
+        // While one of our hosts runs, a background refresh keeps this fresh, so a write
+        // normally reads the cache instead of waiting for a process list.
+        if (cached && this.now() - cached.checkedAt < maxAgeMs) return alive(cached.holders);
+        let scan = this.holderScans.get(key);
+        if (!scan) {
+            scan = this.scanHolders(ws).finally(() => this.holderScans.delete(key));
+            this.holderScans.set(key, scan);
+        }
+        return alive(await scan);
+    }
+
+    private readonly holderScans = new Map<string, Promise<ProjectProcess[]>>();
+
+    private async scanHolders(ws: Pick<Workspace, 'uproject'>): Promise<ProjectProcess[]> {
+        const key = EngineManager.key(ws);
+        const own = this.ownPids();
+        const now = this.now();
+        const cached = this.holderCache.get(key);
+        const pids = await this.launcher.unrealPids();
+        const others = pids?.filter(p => !own.has(p)).sort((a, b) => a - b);
+        // Without a cheap list, fall back to a time-boxed cache of the expensive scan.
+        const sig = others ? others.join(',') : `t${Math.floor(now / 10_000)}`;
+        if (cached && cached.sig === sig && now - cached.scannedAt < 60_000) {
+            cached.checkedAt = now;
+            return cached.holders;
+        }
+        let holders: ProjectProcess[] = [];
+        if (!others || others.length) holders = ((await this.launcher.projectProcesses(ws.uproject)) ?? []).filter(p => !own.has(p.pid));
+        this.holderCache.set(key, { sig, checkedAt: now, scannedAt: now, holders });
+        return holders;
+    }
+
+    private isRunning(host: HostRecord): boolean {
+        return host.exitCode === undefined && this.launcher.isAlive(host.pid);
+    }
+
+    /** Drop a host whose process is gone. */
+    private forget(host: HostRecord): void {
+        if (host.watch) clearInterval(host.watch);
+        if (host.exitCode === undefined) host.exitCode = null;
+        this.lastLogs.set(host.key, host.logs);
+        if (this.hosts.get(host.key) === host) this.hosts.delete(host.key);
+        this.log(`host pid ${host.pid} is gone`);
+    }
+
+    /** True if the host's process exits (or turns out to be gone) within `ms`. */
+    private async diesSoon(host: HostRecord, ms: number): Promise<boolean> {
+        const end = this.now() + ms;
+        for (;;) {
+            if (!this.isRunning(host)) return true;
+            if (this.now() >= end) return false;
+            await sleep(100);
+        }
+    }
+
+    /** Wait until a host that is stopping, retiring or temporary is gone. */
+    private async whenGone(host: HostRecord): Promise<void> {
+        const end = this.now() + this.timings.jobWaitMs + this.timings.stopMs;
+        while (this.isRunning(host) && this.hosts.get(host.key) === host && this.now() < end) {
+            if (host.stopping) {
+                await host.stopping;
+                break;
+            }
+            await sleep(50);
+        }
+        if (!this.isRunning(host)) this.forget(host);
     }
 
     private lease(endpoint: Endpoint, via: LeaseVia, host: HostRecord | undefined, notes: string[], next: string[] = []): Lease {
@@ -360,8 +511,10 @@ export class EngineManager {
         let lock = this.renderLocks.get(key);
         if (!lock) this.renderLocks.set(key, (lock = new Mutex()));
         return lock.run(async () => {
+            const guard = await this.guardWrites(ws, plugin, action, onProgress);
+            if (guard) return guard;
             const own = this.hosts.get(key);
-            if (own && own.mode === 'render' && own.exitCode === undefined && !own.stopping) {
+            if (own && own.mode === 'render' && this.isRunning(own) && !own.stopping && !own.retire) {
                 const ep = await this.helloOn(own, plugin);
                 if (ep) return { lease: this.lease(ep, 'temp-render', own, []) };
             }
@@ -469,6 +622,7 @@ export class EngineManager {
             });
             proc.onExit(code => {
                 host.exitCode = code;
+                if (host.watch) clearInterval(host.watch);
                 stream?.end();
                 this.lastLogs.set(key, host.logs);
                 if (this.hosts.get(key) === host) this.hosts.delete(key);
@@ -512,6 +666,8 @@ export class EngineManager {
                 );
             }
             host.port = ownerEp.port;
+            host.watch = setInterval(() => void this.foreignHolders(host, this.timings.holderRefreshMs * 0.75).catch(() => undefined), this.timings.holderRefreshMs);
+            host.watch.unref();
             host.readyAt = this.now();
             return host;
         } finally {
@@ -626,7 +782,7 @@ export class EngineManager {
     logs(ws: Workspace): { lines: string[]; file?: string; live: boolean } {
         const key = EngineManager.key(ws);
         const host = this.hosts.get(key);
-        if (host) return { lines: host.logs, ...(host.logFile ? { file: host.logFile } : {}), live: true };
+        if (host) return { lines: host.logs, ...(host.logFile ? { file: host.logFile } : {}), live: this.isRunning(host) && !host.stopping };
         return { lines: this.lastLogs.get(key) ?? [], live: false };
     }
 }

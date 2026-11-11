@@ -253,7 +253,7 @@ export class CoreTools {
                 const find = str(args.find)?.toLowerCase();
                 const pick = (find ? lines.filter(l => l.toLowerCase().includes(find)) : lines).slice(-n);
                 if (!lines.length) return textResult('No engine host output yet. Logs exist only for hosts this server started.');
-                return textResult(`${live ? 'Running host' : 'Last host'} output, ${pick.length} line(s)${file ? ` (full log: ${file})` : ''}:\n${pick.join('\n')}`);
+                return textResult(`${live ? 'Running host' : 'Last host (no longer running)'} output, ${pick.length} line(s)${file ? ` (full log: ${file})` : ''}:\n${pick.join('\n')}`);
             }
         }
         return textResult('unreachable');
@@ -265,7 +265,11 @@ export class CoreTools {
         if (!ws.discovery.active.length) lines.push('No Dream plugins with manifests, so nothing to serve.');
         for (const p of ws.discovery.active) lines.push('  ' + describeProbe(p.manifest!.id, probes.get(p.manifest!.id)));
         const own = this.engine.host(ws);
-        if (own) {
+        const gone = own && (own.exitCode !== undefined || !this.engine.pidAlive(own.pid));
+        if (own && gone) lines.push(`The host this server started (pid ${own.pid}) has exited. The next call starts a new one in ${ws.config.engine.mode} mode unless the editor is open.`);
+        else if (own && own.stopping)
+            lines.push(`Host started by this server: pid ${own.pid}, ${own.mode}${own.temporary ? ' (temporary)' : ''}, shutting down${own.inflight ? ` after ${own.inflight} call(s) in flight` : ''}. The next call starts a new one if needed.`);
+        else if (own) {
             const idle = Math.round((Date.now() - own.lastActive) / 1000);
             lines.push(
                 `Host started by this server: pid ${own.pid}, ${own.mode}${own.temporary ? ' (temporary)' : ''}, port ${own.port}, ${own.readyAt ? `up ${Math.round((Date.now() - own.startedAt) / 1000)} s` : 'starting'}, ${own.inflight} in flight, idle ${idle} s of ${own.idleMinutes * 60} s${own.retire ? ', retiring' : ''}`,
@@ -275,7 +279,7 @@ export class CoreTools {
         for (const j of jobs) lines.push(`Running job ${j.job}: ${j.tool} ${j.action}, ${j.status?.state ?? 'running'}`);
         return textResult(lines.join('\n'), false, {
             endpoints: Object.fromEntries([...probes.entries()].map(([k, v]) => [k, v.state === 'alive' ? { state: v.state, mode: v.disc.mode, pid: v.disc.pid, port: v.disc.port, render: v.hello.render, busy: v.hello.busy } : { state: v.state, detail: v.detail }])),
-            host: own ? { pid: own.pid, mode: own.mode, port: own.port, ready: !!own.readyAt, inflight: own.inflight, temporary: own.temporary } : null,
+            host: own ? { pid: own.pid, mode: own.mode, port: own.port, state: gone ? 'exited' : own.stopping ? 'stopping' : own.readyAt ? 'running' : 'starting', inflight: own.inflight, temporary: own.temporary } : null,
         });
     }
 

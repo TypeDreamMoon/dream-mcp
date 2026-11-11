@@ -102,7 +102,7 @@ export function load(p: TestProject, config?: { mode?: 'render' | 'headless'; id
 }
 
 export function fastTimings(over: Partial<Timings> = {}): Timings {
-    return { ...defaultTimings({}), helloMs: 800, callMs: 5000, jobWaitMs: 10_000, pollMs: 20, startMs: 15_000, stopMs: 3000, tickMs: 60_000, startNoteMs: 100, ...over };
+    return { ...defaultTimings({}), helloMs: 800, callMs: 5000, jobWaitMs: 10_000, pollMs: 20, startMs: 15_000, stopMs: 3000, tickMs: 60_000, startNoteMs: 100, holderRefreshMs: 100, editorWaitMs: 600, ...over };
 }
 
 /**
@@ -174,8 +174,18 @@ export class FakeLauncher implements ProcessLauncher {
         }
     }
 
+    /** How many times the expensive command-line scan ran. */
+    projectScans = 0;
+
     async projectProcesses(): Promise<ProjectProcess[]> {
+        this.projectScans++;
         return this.projectProcs;
+    }
+
+    /** The cheap list: every Unreal process, including the hosts this launcher started. */
+    async unrealPids(): Promise<number[]> {
+        const own = this.spawned.filter(s => s.proc.exitCode === undefined).map(s => s.pid);
+        return [...own, ...this.projectProcs.map(p => p.pid)];
     }
 
     async imageName(pid: number): Promise<string | undefined> {

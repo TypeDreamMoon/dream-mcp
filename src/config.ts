@@ -33,6 +33,10 @@ export interface Timings {
     startMs: number;
     /** How long to wait for a host to exit after `/shutdown` before killing it. */
     stopMs: number;
+    /** How often the list of other Unreal processes is refreshed while one of our hosts runs. */
+    holderRefreshMs: number;
+    /** How long a write waits for an editor that is opening the project to publish its endpoint. */
+    editorWaitMs: number;
     /** How often a starting host reports that it is still starting. */
     startNoteMs: number;
     /** Idle check interval. */
@@ -52,6 +56,8 @@ export function defaultTimings(env: NodeJS.ProcessEnv = process.env): Timings {
         startMs: num('DREAM_MCP_START_TIMEOUT_MS', 600_000),
         stopMs: 30_000,
         startNoteMs: 5000,
+        holderRefreshMs: 2000,
+        editorWaitMs: num('DREAM_MCP_EDITOR_WAIT_MS', 120_000),
         tickMs: 30_000,
     };
 }

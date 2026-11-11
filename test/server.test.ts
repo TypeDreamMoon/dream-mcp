@@ -384,3 +384,48 @@ test('status and doctor say when headless falls back to rendering', async () => 
         await p.cleanup();
     }
 });
+
+test('headless: preview, then a long action straight away, runs on a fresh headless host', async () => {
+    const p = await makeProject({ fixtures: ['DemoPlugin'] });
+    const c = await connect(p);
+    try {
+        await c.call('dream_workspace', 'add', { project: p.uproject, mode: 'headless' });
+        for (let round = 0; round < 2; round++) {
+            const snap = await c.call('dream_demo', 'snap', { file: 'Demo/a.dmo' });
+            const tempPid = (snap.structuredContent!.engine as { pid: number }).pid;
+            assert.equal((snap.structuredContent!.engine as { via: string }).via, 'temp-render');
+            const build = await c.call('dream_demo', 'build', { file: 'Demo/a.dmo', steps: 4, stepMs: 40 });
+            assert.equal(build.isError, undefined, c.text(build));
+            assert.match(c.text(build), /^Built Demo\/a\.dmo\./);
+            const eng = build.structuredContent!.engine as { via: string; pid: number };
+            assert.notEqual(eng.pid, tempPid);
+            assert.equal(eng.via, 'host');
+            assert.equal((build.structuredContent!.data as { render: boolean }).render, false);
+        }
+        assert.deepEqual(c.launcher.killed, []);
+    } finally {
+        await c.done();
+        await p.cleanup();
+    }
+});
+
+test('a job whose engine died is reported as failed and does not linger in status', async () => {
+    const p = await makeProject({ fixtures: ['DemoPlugin'] });
+    const c = await connect(p);
+    try {
+        await c.call('dream_demo', 'echo', { text: 'warm' });
+        const host = c.launcher.spawned[0]!;
+        setTimeout(() => process.kill(host.pid, 'SIGKILL'), 200);
+        const r = await c.call('dream_demo', 'slow');
+        assert.equal(r.isError, true);
+        assert.match(c.text(r), /engine-error/);
+        const status = c.text(await c.call('dream_engine', 'status'));
+        assert.doesNotMatch(status, /Running job/);
+        assert.doesNotMatch(status, new RegExp(`Host started by this server: pid ${host.pid}, render, port`));
+        // The next call simply works on a new host.
+        assert.match(c.text(await c.call('dream_demo', 'echo', { text: 'again' })), /^echo: again/);
+    } finally {
+        await c.done();
+        await p.cleanup();
+    }
+});
