@@ -145,7 +145,8 @@ claude mcp add dream -- npx -y <克隆目录的路径>
 
 1. 随插件发布 `Resources/DreamMCP.json`:id、路由、给模型看的说明,每个动作一条,参数用 JSON Schema。
 2. 在插件的编辑器模块里实现端点:`hello`、`call`、`jobs`、`cancel`,宿主还要 `shutdown`;
-   只监听 127.0.0.1 并校验令牌。启动时写发现文件。
+   只监听 127.0.0.1 并校验令牌。令牌先读环境变量 `DREAM_MCP_TOKEN`(dream-mcp 起宿主时
+   就是这样传的,绝不放命令行),其次 `-DreamMCPToken=`。启动时写发现文件。
 3. 可选:提供一个持续 tick 的宿主 commandlet,让没开编辑器时也有端点可用。
 
 完整契约见 [docs/protocol.md](docs/protocol.md)(英文)。测试里的假端点

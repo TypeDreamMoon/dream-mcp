@@ -10,6 +10,8 @@ export const PROTOCOL = 1;
 export const MANIFEST_SCHEMA = 1;
 
 export const DEFAULT_PORT = 47800;
+/** Environment variable that carries the endpoint token to a host this server starts. */
+export const TOKEN_ENV = 'DREAM_MCP_TOKEN';
 export const DEFAULT_IDLE_MINUTES = 15;
 
 /** Where the registry, start locks and logs live. `DREAM_MCP_HOME` overrides it (tests use this). */

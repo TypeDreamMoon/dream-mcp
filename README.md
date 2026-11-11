@@ -161,8 +161,10 @@ content.
 1. Ship `Resources/DreamMCP.json` with the plugin: an id, a route, a description for the
    model, and one entry per action with a JSON Schema for its arguments.
 2. Implement the endpoint in the plugin's editor module: `hello`, `call`, `jobs`, `cancel`
-   and, for the host, `shutdown`, on 127.0.0.1 with the token check. Write the discovery
-   file on start.
+   and, for the host, `shutdown`, on 127.0.0.1 with the token check. Read the token from
+   the `DREAM_MCP_TOKEN` environment variable first (that is how dream-mcp passes it to a
+   host it starts; it never puts the token on the command line), then `-DreamMCPToken=`.
+   Write the discovery file on start.
 3. Optionally provide a host commandlet that keeps ticking so the endpoint is available
    without an editor.
 

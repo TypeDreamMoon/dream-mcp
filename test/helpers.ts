@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defaultTimings, type Timings } from '../src/config.js';
-import type { ProcessLauncher, ProjectProcess, SpawnedProcess } from '../src/engine/process.js';
+import type { ProcessLauncher, ProjectProcess, SpawnedProcess, SpawnOptions } from '../src/engine/process.js';
 import type { EngineLookup } from '../src/workspace/engine.js';
 import { loadWorkspace, type Workspace } from '../src/workspace/workspace.js';
 
@@ -110,7 +110,7 @@ export function fastTimings(over: Partial<Timings> = {}): Timings {
  * was asked to start and kill, and refuses to kill anything it did not start.
  */
 export class FakeLauncher implements ProcessLauncher {
-    readonly spawned: { command: string; args: string[]; pid: number; proc: SpawnedProcess }[] = [];
+    readonly spawned: { command: string; args: string[]; env: Record<string, string>; pid: number; proc: SpawnedProcess }[] = [];
     readonly killed: number[] = [];
     env: Record<string, string> = {};
     /** What projectProcesses() reports (an editor without an endpoint, say). */
@@ -118,8 +118,12 @@ export class FakeLauncher implements ProcessLauncher {
     /** imageName() answers; spawned hosts are always Unreal. */
     images = new Map<number, string>();
 
-    spawn(command: string, args: string[], opts: { cwd: string }): SpawnedProcess {
-        const child = spawn(process.execPath, [HOST_SCRIPT, ...args], { cwd: opts.cwd, env: { ...process.env, ...this.env }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    spawn(command: string, args: string[], opts: SpawnOptions): SpawnedProcess {
+        // A DREAM_MCP_TOKEN in the test runner's own environment must not mask a missing one.
+        const inherited = { ...process.env };
+        delete inherited.DREAM_MCP_TOKEN;
+        const env = opts.env ?? {};
+        const child = spawn(process.execPath, [HOST_SCRIPT, ...args], { cwd: opts.cwd, env: { ...inherited, ...this.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
         const lines: ((l: string) => void)[] = [];
         const exits: ((c: number | null) => void)[] = [];
         let exitCode: number | null | undefined;
@@ -147,7 +151,7 @@ export class FakeLauncher implements ProcessLauncher {
             onExit: cb => (exitCode !== undefined ? cb(exitCode) : void exits.push(cb)),
             onLine: cb => void lines.push(cb),
         };
-        this.spawned.push({ command, args, pid: child.pid!, proc });
+        this.spawned.push({ command, args, env, pid: child.pid!, proc });
         return proc;
     }
 

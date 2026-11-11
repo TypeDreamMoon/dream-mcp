@@ -10,6 +10,12 @@ export interface SpawnedProcess {
     onLine(cb: (line: string) => void): void;
 }
 
+/** `env` is added to this process's environment; secrets go here, never on the command line. */
+export interface SpawnOptions {
+    cwd: string;
+    env?: Record<string, string>;
+}
+
 export interface ProjectProcess {
     pid: number;
     name: string;
@@ -21,7 +27,7 @@ export interface ProjectProcess {
  */
 export interface ProcessLauncher {
     /** Start `command` directly (never through a shell). */
-    spawn(command: string, args: string[], opts: { cwd: string }): SpawnedProcess;
+    spawn(command: string, args: string[], opts: SpawnOptions): SpawnedProcess;
     isAlive(pid: number): boolean;
     /** Terminate the process with this PID and its children. Only ever called with a PID this server started. */
     kill(pid: number): Promise<void>;
@@ -53,7 +59,7 @@ export function commandLineNamesProject(commandLine: string, uproject: string): 
 
 export const nodeLauncher: ProcessLauncher = {
     spawn(command, args, opts) {
-        const child = spawn(command, args, { cwd: opts.cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], shell: false });
+        const child = spawn(command, args, { cwd: opts.cwd, env: { ...process.env, ...(opts.env ?? {}) }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], shell: false });
         const lineHandlers: ((l: string) => void)[] = [];
         const exitHandlers: ((c: number | null) => void)[] = [];
         let exitCode: number | null | undefined;

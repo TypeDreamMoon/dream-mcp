@@ -80,7 +80,9 @@ test('rule 3: nothing running starts a render host with the documented command l
         for (const f of ['-unattended', '-nosplash', '-nopause', '-stdout', '-AllowCommandletRendering']) assert.ok(s.args.includes(f), f);
         assert.ok(!s.args.includes('-nullrhi'));
         assert.ok(s.args.some(a => /^-DreamMCPPort=\d+$/.test(a)));
-        assert.ok(s.args.some(a => /^-DreamMCPToken=[0-9a-f]{48}$/.test(a)));
+        // The token travels in the environment only, never on the command line.
+        assert.ok(!s.args.some(a => /DreamMCPToken|[0-9a-f]{48}/.test(a)), s.args.join(' '));
+        assert.match(s.env.DREAM_MCP_TOKEN ?? '', /^[0-9a-f]{48}$/);
         await l.release();
 
         const again = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('build')));
@@ -422,3 +424,16 @@ test('the write lock serialises writes per project', async () => {
 });
 
 void writePlugin;
+
+test('the real launcher hands secrets to the child through the environment', async () => {
+    const { nodeLauncher } = await import('../src/engine/process.js');
+    const proc = nodeLauncher.spawn(process.execPath, ['-e', 'console.log("token=" + process.env.DREAM_MCP_TOKEN + " argv=" + process.argv.length)'], {
+        cwd: process.cwd(),
+        env: { DREAM_MCP_TOKEN: 'abc123' },
+    });
+    const lines: string[] = [];
+    proc.onLine(l => lines.push(l));
+    await new Promise<void>(r => proc.onExit(() => r()));
+    await waitFor(() => lines.some(l => l.startsWith('token=')), 5000, 'child output');
+    assert.ok(lines.includes('token=abc123 argv=1'), lines.join('|'));
+});

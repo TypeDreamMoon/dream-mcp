@@ -24,7 +24,12 @@ async function main(): Promise<void> {
     const uproject = argv[0]!;
     const flag = (name: string) => argv.find(a => a.startsWith(`-${name}=`))?.slice(name.length + 2);
     const port = Number(flag('DreamMCPPort'));
-    const token = flag('DreamMCPToken')!;
+    // Same order the engine side uses: the environment first, then the command line.
+    const token = process.env.DREAM_MCP_TOKEN || flag('DreamMCPToken');
+    if (!token) {
+        process.stdout.write('FakeHost: no token (DREAM_MCP_TOKEN or -DreamMCPToken)\n');
+        process.exit(4);
+    }
     const render = !argv.includes('-nullrhi');
     process.stdout.write(`FakeHost: run=${flag('run')} port=${port} render=${render}\n`);
 

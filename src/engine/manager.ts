@@ -3,7 +3,7 @@ import { createWriteStream, promises as fs, type WriteStream } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { DEFAULT_PORT, PROTOCOL, type Timings } from '../config.js';
+import { DEFAULT_PORT, PROTOCOL, TOKEN_ENV, type Timings } from '../config.js';
 import type { ActionSpec } from '../manifest.js';
 import { EndpointClient, type Endpoint } from '../protocol/client.js';
 import { isDiscovery, refused, type ResultBody } from '../protocol/types.js';
@@ -371,14 +371,15 @@ export class EngineManager {
                 ws.uproject,
                 `-run=${commandlet}`,
                 `-DreamMCPPort=${port}`,
-                `-DreamMCPToken=${token}`,
                 '-unattended',
                 '-nosplash',
                 '-nopause',
                 '-stdout',
                 mode === 'render' ? '-AllowCommandletRendering' : '-nullrhi',
             ];
-            const proc = this.launcher.spawn(ws.engine.editorCmd, args, { cwd: ws.dir });
+            // The token goes in the environment, not on the command line, where any local
+            // process could read it from the process list.
+            const proc = this.launcher.spawn(ws.engine.editorCmd, args, { cwd: ws.dir, env: { [TOKEN_ENV]: token } });
             const key = EngineManager.key(ws);
             const host: HostRecord = {
                 key,

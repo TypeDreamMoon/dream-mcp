@@ -94,7 +94,9 @@ Path: `<Plugin>/Resources/DreamMCP.json`. Ship `Resources/` with the plugin.
 - Port: default `47800`; `-DreamMCPPort=<n>` on the command line overrides it. If binding
   fails, try the following ports. Several Dream plugins in one process share one port,
   each under its own route prefix.
-- Token: `-DreamMCPToken=<t>` if given, otherwise random per process. **Every** request
+- Token: the environment variable `DREAM_MCP_TOKEN` if set, else `-DreamMCPToken=<t>` if
+  given, otherwise random per process. dream-mcp passes it only in the environment, because
+  a command line is visible to every local process. **Every** request
   must carry `X-Dream-Token: <t>`; otherwise answer `401`. Any request with an `Origin`
   header gets `403` (this keeps browsers out).
 - On start, write a discovery file `<Project>/Saved/DreamMCP/<id>.json`; delete it on
@@ -190,10 +192,13 @@ project is still held by something.
   plugins) that declares one, directly (no shell), and records its pid:
 
 ```
-UnrealEditor-Cmd <uproject> -run=<Host> -DreamMCPPort=<p> -DreamMCPToken=<t> -unattended -nosplash -nopause -stdout
+DREAM_MCP_TOKEN=<t>   (environment)
+UnrealEditor-Cmd <uproject> -run=<Host> -DreamMCPPort=<p> -unattended -nosplash -nopause -stdout
    render mode adds:   -AllowCommandletRendering
    headless mode adds: -nullrhi
 ```
+
+The token is never put on the command line.
 
 ## 4. How the server routes a call
 
