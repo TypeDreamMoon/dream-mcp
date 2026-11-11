@@ -10,8 +10,11 @@
  *   DREAM_MCP_E2E_TIMEOUT_MS  per-step wait for long jobs                                (default: 600000)
  *
  * Run: npm run test:contract   (after setting the variables)
- * The engine is started with the real launcher when nothing serves the project yet, and
- * stopped at the end. Timings are printed as test diagnostics.
+ * One DreamServer instance starts the host (with the real launcher, when nothing serves the
+ * project yet) and runs the tools, so with DREAM_MCP_E2E_MODE=headless a render action
+ * really goes through "stop the resident host, run a temporary rendering editor". Hosts
+ * are stopped at the end. Timings, the serving process (`via`) and the tool's notes are
+ * printed as test diagnostics.
  */
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -22,13 +25,11 @@ import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { defaultTimings } from '../src/config.js';
 import { discoveryFile } from '../src/engine/discovery.js';
-import { EngineManager } from '../src/engine/manager.js';
-import { nodeLauncher } from '../src/engine/process.js';
 import type { ActionSpec } from '../src/manifest.js';
 import { EndpointClient, type Endpoint } from '../src/protocol/client.js';
 import { DreamServer } from '../src/server.js';
 import { readJsonSettled } from '../src/util/fs.js';
-import { resolveUProject, WorkspaceService } from '../src/workspace/workspace.js';
+import { resolveUProject } from '../src/workspace/workspace.js';
 import { tempDir } from './helpers.js';
 import { discoveryProblems, helloProblems, jobProblems, resultProblems } from './shape.js';
 
@@ -69,11 +70,22 @@ test('contract: real endpoints follow the protocol', { skip, timeout: 3_600_000 
     assert.ok(uproject, `${PROJECT} is not a .uproject or a folder with one`);
     const home = await tempDir('contract-home');
     const timings = { ...defaultTimings(process.env), jobWaitMs: Number(process.env.DREAM_MCP_E2E_TIMEOUT_MS ?? 600_000) };
-    const svc = new WorkspaceService({ home, env: { DREAM_MCP_PROJECT: uproject } });
-    const ws = (await svc.current()).workspace!;
+    // One server instance starts the host *and* runs the tools, exactly as in real use, so
+    // paths that depend on "this server started the host" (stopping a headless host to
+    // render, idle shutdown) are really exercised.
+    const mode = process.env.DREAM_MCP_E2E_MODE === 'headless' ? 'headless' : 'render';
+    const dream = new DreamServer({ home, env: { DREAM_MCP_PROJECT: uproject }, timings, log: l => t.diagnostic(l) });
+    await dream.workspaces.registry.upsert({ name: 'contract', project: uproject, addedAt: new Date().toISOString(), engine: { mode, idleMinutes: 60 } });
+    await dream.sync();
+    const ws = (await dream.workspaces.current()).workspace!;
     assert.ok(ws, 'workspace');
-    if (process.env.DREAM_MCP_E2E_MODE === 'headless') ws.config.engine.mode = 'headless';
-    const mgr = new EngineManager({ launcher: nodeLauncher, timings, home, log: l => t.diagnostic(l) });
+    assert.equal(ws.config.engine.mode, mode);
+    const mgr = dream.engine;
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await dream.createMcpServer().connect(serverSide);
+    const client = new Client({ name: 'contract', version: '1' });
+    await client.connect(clientSide);
+    const reader: ActionSpec = { name: '_probe', description: '', needs: 'engine', writes: false, long: false, args: { type: 'object' } };
     const only = process.env.DREAM_MCP_E2E_PLUGIN;
     const plugins = ws.discovery.active.filter(p => !only || p.manifest!.id === only);
     assert.ok(plugins.length, `no active Dream plugin manifests in ${uproject}${only ? ` with id ${only}` : ''}`);
@@ -90,7 +102,6 @@ test('contract: real endpoints follow the protocol', { skip, timeout: 3_600_000 
                     st.diagnostic(`using the running ${probe0.disc.mode} (pid ${probe0.disc.pid})`);
                 } else {
                     assert.notEqual(process.env.DREAM_MCP_E2E_NO_START, '1', `nothing serves ${m.id} (${probe0.detail}) and DREAM_MCP_E2E_NO_START=1`);
-                    const reader: ActionSpec = { name: '_probe', description: '', needs: 'engine', writes: false, long: false, args: { type: 'object' } };
                     const t0 = Date.now();
                     const got = await mgr.acquire(ws, plugin, reader);
                     assert.ok(!('refusal' in got), 'refusal' in got ? `${got.refusal.reason}: ${got.refusal.summary}` : '');
@@ -154,45 +165,51 @@ test('contract: real endpoints follow the protocol', { skip, timeout: 3_600_000 
                     assert.ok(opened, 'WebSocket accepts the auth frame and stays open');
                 }
 
-                // Real actions, end to end through the MCP surface.
+                // Real actions, end to end through the MCP surface of the same server.
                 const calls = JSON.parse(process.env.DREAM_MCP_E2E_ACTIONS ?? '[]') as { action: string; args?: Record<string, unknown>; tool?: string }[];
                 const mine = calls.filter(c => !c.tool || c.tool === `dream_${m.id}`);
-                if (!mine.length) return;
-                const dream = new DreamServer({ home, env: { DREAM_MCP_PROJECT: uproject }, timings, log: l => st.diagnostic(l) });
-                await dream.sync();
-                const [a, b] = InMemoryTransport.createLinkedPair();
-                await dream.createMcpServer().connect(b);
-                const client = new Client({ name: 'contract', version: '1' });
-                await client.connect(a);
-                try {
-                    for (const c of mine) {
-                        const t0 = Date.now();
-                        const r = (await client.callTool({ name: `dream_${m.id}`, arguments: { action: c.action, args: c.args ?? {} } }, { timeout: timings.jobWaitMs + 60_000 } as never)) as {
-                            content: { type: string; text?: string }[];
-                            structuredContent?: Record<string, unknown>;
-                        };
-                        st.diagnostic(`${c.action}: ${((Date.now() - t0) / 1000).toFixed(2)} s -> ${r.content.find(x => x.type === 'text')?.text?.split('\n')[0]}`);
-                        if (r.structuredContent && 'outcome' in r.structuredContent) {
-                            const { engine: _engine, ...body } = r.structuredContent;
-                            assert.deepEqual(resultProblems(body), [], `${c.action} result`);
-                        }
-                        // Long actions: the job endpoint must agree with what the tool returned.
-                        const spec = m.actions.find(x => x.name === c.action);
-                        if (spec?.long) {
-                            const call = await new EndpointClient(ep, timings).call(`contract-${Date.now()}`, c.action, c.args ?? {});
-                            if (call.kind === 'job') {
-                                const w = await new EndpointClient({ ...ep, ws: null }, timings).waitJob(call.job, { deadlineMs: timings.jobWaitMs });
-                                assert.deepEqual(jobProblems(w.status), [], `${c.action} job status`);
-                            } else assert.fail(`${c.action} is long in the manifest but /call did not answer 202`);
-                        }
+                for (const c of mine) {
+                    const t0 = Date.now();
+                    const r = (await client.callTool({ name: `dream_${m.id}`, arguments: { action: c.action, args: c.args ?? {} } }, { timeout: timings.jobWaitMs + 60_000 } as never)) as {
+                        content: { type: string; text?: string }[];
+                        structuredContent?: Record<string, unknown>;
+                    };
+                    const via = (r.structuredContent?.engine as { via?: string } | undefined)?.via ?? '-';
+                    const first = r.content.find(x => x.type === 'text')?.text ?? '';
+                    st.diagnostic(`${c.action}: ${((Date.now() - t0) / 1000).toFixed(2)} s via ${via} -> ${first.split('\n')[0]}`);
+                    for (const line of first.split('\n').filter(l => l.startsWith('Note:') || l.startsWith('  - '))) st.diagnostic(`  ${line.trim()}`);
+                    if (r.structuredContent && 'outcome' in r.structuredContent) {
+                        const { engine: _engine, ...body } = r.structuredContent;
+                        assert.deepEqual(resultProblems(body), [], `${c.action} result`);
                     }
-                } finally {
-                    await client.close();
-                    await dream.close('contract test over');
+                    const spec = m.actions.find(x => x.name === c.action);
+                    // A headless host this server started must not turn a render action into a refusal.
+                    if (spec?.needs === 'render' && mode === 'headless')
+                        assert.notEqual(r.structuredContent?.reason, 'render-unavailable', `${c.action} should run in a temporary rendering process: ${first}`);
+                    // Long actions: the job endpoint must agree with what the tool returned.
+                    // The serving process may have changed (temporary render process), so look again.
+                    if (spec?.long) {
+                        const now = await mgr.probe(ws, m.id);
+                        let cur: Endpoint | undefined = now.state === 'alive' ? now.endpoint : undefined;
+                        if (!cur) {
+                            const got = await mgr.acquire(ws, plugin, reader);
+                            if ('lease' in got) {
+                                cur = got.lease.endpoint;
+                                await got.lease.release();
+                            }
+                        }
+                        assert.ok(cur, `no endpoint for ${m.id} after ${c.action}`);
+                        const call = await new EndpointClient(cur!, timings).call(`contract-${Date.now()}`, c.action, c.args ?? {});
+                        if (call.kind === 'job') {
+                            const w = await new EndpointClient({ ...cur!, ws: null }, timings).waitJob(call.job, { deadlineMs: timings.jobWaitMs });
+                            assert.deepEqual(jobProblems(w.status), [], `${c.action} job status`);
+                        } else assert.fail(`${c.action} is long in the manifest but /call did not answer 202`);
+                    }
                 }
             });
         }
     } finally {
-        await mgr.stopAll('contract test over');
+        await client.close();
+        await dream.close('contract test over');
     }
 });
