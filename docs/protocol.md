@@ -255,6 +255,11 @@ never put on the command line.
   register their endpoints from their own module startup. If no plugin declares a
   commandlet, a headless setting falls back to the render form, and `dream_workspace status`
   and `doctor` say so.
+- A host counts as ready once **every** enabled plugin of the project with a manifest
+  answers `hello`, not just the first: each plugin publishes its endpoint from its own
+  module, a moment apart. One that has not answered within 30 seconds of the first is marked
+  not ready (`dream_engine start` lists it) without failing the start, and a call to it
+  waits for its endpoint before giving up.
 - A windowless editor's first start (shader compilation, DDC warm-up) is slower than a
   commandlet's. While a host starts, dream-mcp sends MCP progress notifications every few
   seconds and waits up to `DREAM_MCP_START_TIMEOUT_MS` (default 10 minutes).

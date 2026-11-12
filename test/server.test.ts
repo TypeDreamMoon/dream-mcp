@@ -601,3 +601,64 @@ test('a call served by a different engine process than the previous one says tha
         await p.cleanup();
     }
 });
+
+async function twoPluginProject() {
+    const demo = await demoManifest();
+    const { host: _host, ...rest } = demo;
+    return makeProject({ fixtures: ['DemoPlugin'], plugins: [{ name: 'ZOther', manifest: { ...rest, id: 'zother', plugin: 'ZOther', title: 'ZOther', route: '/dream/zother' } }] });
+}
+
+test('dream_engine start returns once every plugin of the project answers', async () => {
+    const p = await twoPluginProject();
+    const c = await connect(p);
+    try {
+        c.launcher.env = { FAKE_HOST_LATE: 'zother:800' };
+        const t0 = Date.now();
+        const start = await c.call('dream_engine', 'start', { mode: 'headless' });
+        assert.ok(Date.now() - t0 >= 800, 'waited for the late endpoint');
+        assert.match(c.text(start), /Ready: dream_demo, dream_zother\./);
+        assert.deepEqual(start.structuredContent!.notReady, []);
+        // Straight away, the second plugin works.
+        const r = await c.call('dream_zother', 'echo', { text: 'right away' });
+        assert.match(c.text(r), /^echo: right away/);
+        assert.equal(c.launcher.spawned.length, 1);
+    } finally {
+        await c.done();
+        await p.cleanup();
+    }
+});
+
+test('a plugin whose endpoint is later than the wait is reported as not ready, and a call to it waits for it', async () => {
+    const p = await twoPluginProject();
+    const c = await connect(p, { timings: { pluginReadyMs: 400 } });
+    try {
+        c.launcher.env = { FAKE_HOST_LATE: 'zother:1500' };
+        const start = await c.call('dream_engine', 'start', { mode: 'headless' });
+        assert.equal(start.isError, undefined, 'the start itself succeeds');
+        assert.match(c.text(start), /Ready: dream_demo\./);
+        assert.match(c.text(start), /Not ready: dream_zother \(no answer within 0\.4 s\)\. Calls to it wait for its endpoint/);
+        assert.deepEqual(start.structuredContent!.notReady, ['zother']);
+        const r = await c.call('dream_zother', 'echo', { text: 'late' });
+        assert.equal(r.isError, undefined, c.text(r));
+        assert.match(c.text(r), /^echo: late/);
+        assert.equal(c.launcher.spawned.length, 1);
+    } finally {
+        await c.done();
+        await p.cleanup();
+    }
+});
+
+test('the first call going to a plugin whose endpoint comes up late starts the host and waits for that endpoint', async () => {
+    const p = await twoPluginProject();
+    const c = await connect(p);
+    try {
+        c.launcher.env = { FAKE_HOST_LATE: 'zother:800' };
+        const r = await c.call('dream_zother', 'echo', { text: 'first' });
+        assert.equal(r.isError, undefined, c.text(r));
+        assert.match(c.text(r), /^echo: first/);
+        assert.equal(c.launcher.spawned.length, 1);
+    } finally {
+        await c.done();
+        await p.cleanup();
+    }
+});

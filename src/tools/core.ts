@@ -303,10 +303,17 @@ export class CoreTools {
         if ('refusal' in r) return renderResult(r.refusal);
         const h = r.host;
         const secs = ((Date.now() - t0) / 1000).toFixed(1);
-        return textResult(own && own.pid === h.pid ? `The engine host is already running (pid ${h.pid}, ${h.mode}).` : `Started the engine host (pid ${h.pid}, ${h.mode}, port ${h.port}) in ${secs} s.`, false, {
-            pid: h.pid,
-            mode: h.mode,
-            port: h.port,
-        });
+        const ids = ws.discovery.active.map(p => p.manifest!.id);
+        const notReady = h.notReady ?? [];
+        const ready = ids.filter(id => !notReady.includes(id));
+        const lines = [
+            own && own.pid === h.pid ? `The engine host is already running (pid ${h.pid}, ${h.mode}).` : `Started the engine host (pid ${h.pid}, ${h.mode}, port ${h.port}) in ${secs} s.`,
+            `Ready: ${ready.map(id => `dream_${id}`).join(', ') || 'none'}.`,
+        ];
+        if (notReady.length)
+            lines.push(
+                `Not ready: ${notReady.map(id => `dream_${id}`).join(', ')} (no answer within ${Math.round(this.engine.timings.pluginReadyMs / 100) / 10} s). Calls to it wait for its endpoint; if it never appears, check that the plugin is built and enabled, and see dream_engine logs.`,
+            );
+        return textResult(lines.join('\n'), false, { pid: h.pid, mode: h.mode, port: h.port, ready, notReady });
     }
 }

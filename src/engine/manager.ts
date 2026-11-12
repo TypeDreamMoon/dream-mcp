@@ -44,6 +44,8 @@ export interface HostRecord {
     logs: string[];
     logFile?: string;
     exitCode?: number | null;
+    /** Plugins of the project whose endpoint had not answered when the host was declared ready. */
+    notReady?: string[];
     /** Background refresh of "who else has this project open" while the host runs. */
     watch?: NodeJS.Timeout;
 }
@@ -294,6 +296,19 @@ export class EngineManager {
                     this.forget(own);
                     continue;
                 }
+                // The host is up but this plugin's endpoint came up late (or not yet): wait for
+                // it rather than refuse, when the host is new or the plugin was marked not ready.
+                const late = own.notReady?.includes(id) || !own.readyAt || this.now() - own.readyAt < this.timings.pluginReadyMs * 2;
+                if (late) {
+                    const ep = await this.helloOn(own, plugin, this.timings.pluginReadyMs);
+                    if (ep) {
+                        own.notReady = own.notReady?.filter(x => x !== id);
+                        if (needRender && own.mode !== 'render') return this.tempRender(ws, plugin, action, onProgress);
+                        const guard = await this.guardOthers(ws, plugin, action, onProgress, false);
+                        if (guard) return guard;
+                        return { lease: this.lease(ep, own.temporary ? 'temp-render' : 'host', own, []) };
+                    }
+                }
                 return refuse('plugin-not-loaded', `The engine host (pid ${own.pid}) is running but ${plugin.name} has no endpoint in it.`, [
                     `Check that ${plugin.name} is built for this engine and enabled, then call dream_engine restart.`,
                     'dream_engine logs shows the host output.',
@@ -312,7 +327,7 @@ export class EngineManager {
                 return started;
             }
             const host = started.host;
-            const ep = await this.helloOn(host, plugin, 15_000);
+            const ep = await this.helloOn(host, plugin, this.timings.pluginReadyMs);
             if (!ep)
                 return refuse('plugin-not-loaded', `The engine host started (pid ${host.pid}) but ${plugin.name} has no endpoint in it.`, [
                     `Check that ${plugin.name} is built for this engine and enabled.`,
@@ -778,6 +793,13 @@ export class EngineManager {
             host.port = ownerEp.port;
             host.watch = setInterval(() => void this.foreignHolders(host, this.timings.holderRefreshMs * 0.75).catch(() => undefined), this.timings.holderRefreshMs);
             host.watch.unref();
+            // Ready means every plugin of the project answers, not just the one whose route
+            // answered first: each plugin publishes its endpoint from its own module, a moment
+            // apart. One that does not answer in time is marked, not fatal.
+            const others = ws.discovery.active.filter(p => p.manifest!.id !== owner.manifest!.id);
+            const answered = await Promise.all(others.map(p => this.helloOn(host, p, this.timings.pluginReadyMs)));
+            host.notReady = others.filter((_, i) => !answered[i]).map(p => p.manifest!.id);
+            if (host.notReady.length) this.log(`host pid ${host.pid}: no endpoint yet for ${host.notReady.join(', ')}`);
             host.readyAt = this.now();
             return host;
         } finally {
