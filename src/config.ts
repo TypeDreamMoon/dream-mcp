@@ -43,6 +43,8 @@ export interface Timings {
     editorLaunchWindowMs: number;
     /** How long a write waits for an editor that is opening the project to publish its endpoint. */
     editorWaitMs: number;
+    /** Once a host answers, how long to wait for each other plugin of the project to answer too. */
+    pluginReadyMs: number;
     /** How often a starting host reports that it is still starting. */
     startNoteMs: number;
     /** Idle check interval. */
@@ -62,6 +64,7 @@ export function defaultTimings(env: NodeJS.ProcessEnv = process.env): Timings {
         startMs: num('DREAM_MCP_START_TIMEOUT_MS', 600_000),
         stopMs: 30_000,
         startNoteMs: 5000,
+        pluginReadyMs: 30_000,
         holderRefreshMs: 2000,
         editorStartWindowMs: 120_000,
         editorLaunchWindowMs: 300_000,

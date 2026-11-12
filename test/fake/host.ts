@@ -14,6 +14,7 @@
  *   FAKE_HOST_PORT_SHIFT      bind to the requested port + this (the port was taken)
  *   FAKE_HOST_WS              offer a WebSocket
  *   FAKE_HOST_SKIP            comma-separated plugin ids that do not load in this process
+ *   FAKE_HOST_LATE            <id>:<ms>, that plugin's endpoint comes up this much later
  */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -68,12 +69,21 @@ async function main(): Promise<void> {
             else void exit('shutdown');
         },
     });
+    // FAKE_HOST_LATE=<id>:<ms> -- that plugin's endpoint comes up this much later, as when
+    // each plugin module publishes its own endpoint a moment apart.
+    const [lateId, lateMs] = (process.env.FAKE_HOST_LATE ?? '').split(':');
+    const late = found.active.filter(p => p.manifest!.id === lateId);
     for (const p of found.active) {
-        if (skip.has(p.manifest!.id)) continue;
+        if (skip.has(p.manifest!.id) || late.includes(p)) continue;
         engine.addPlugin(p.manifest as unknown as FakeManifest, demoBehaviors(engine));
     }
     await engine.start();
     process.stdout.write(`FakeHost: listening on ${engine.port} for ${[...engine.plugins.keys()].join(',')}\n`);
+    if (late.length)
+        setTimeout(() => {
+            for (const p of late) engine.addPlugin(p.manifest as unknown as FakeManifest, demoBehaviors(engine));
+            void engine.writeDiscovery().then(() => process.stdout.write(`FakeHost: late endpoint up for ${lateId}\n`));
+        }, Number(lateMs ?? 0));
 
     if (parent > 0)
         setInterval(() => {
