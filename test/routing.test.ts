@@ -697,7 +697,8 @@ test('a starting editor that never publishes an endpoint: after the wait a read 
         await read.release();
         const w = refusal(await t.mgr.acquire(t.ws, t.plugin, t.action('poke')));
         assert.equal(w.reason, 'editor-without-endpoint');
-        assert.match(w.summary, /did not appear within/);
+        // The read already waited the full limit for this process, so the write does not wait again.
+        assert.match(w.summary, /not waited for again/);
     } finally {
         editorProc.kill();
         await t.done();
@@ -739,6 +740,55 @@ test('our host already running and an editor starting: reads stay on our host wi
         assert.ok(Date.now() - t0 < 1500, 'reads do not wait');
         await read.release();
         assert.equal(t.launcher.spawned.length, 1);
+    } finally {
+        editorProc.kill();
+        await t.done();
+    }
+});
+
+test('a process waited for in full once is not waited for again: later writes are refused at once, reads go ahead', async () => {
+    const t = await setup({ timings: { editorWaitMs: 2000 } });
+    const editorProc = dummyProcess();
+    try {
+        t.launcher.projectProcs = [{ pid: editorProc.pid, name: 'UnrealEditor.exe', startedAt: Date.now() - 1000 }];
+        const t0 = Date.now();
+        const first = refusal(await t.mgr.acquire(t.ws, t.plugin, t.action('poke')));
+        assert.ok(Date.now() - t0 >= 2000);
+        assert.match(first.summary, /did not appear in the \d+ s dream-mcp waited/);
+        const t1 = Date.now();
+        const second = refusal(await t.mgr.acquire(t.ws, t.plugin, t.action('poke')));
+        assert.ok(Date.now() - t1 < 1000, `second write waited ${Date.now() - t1} ms`);
+        assert.match(second.summary, /did not publish a DreamMCP endpoint while dream-mcp waited \d+ s for it\. It is not waited for again/);
+        const t2 = Date.now();
+        const read = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('echo')));
+        assert.ok(Date.now() - t2 < 3000, 'the read did not wait again');
+        assert.equal(read.via, 'host');
+        await read.release();
+        // Once that process publishes an endpoint, the verdict is forgotten and calls go to it.
+        await t.editor({ pid: editorProc.pid });
+        const w = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('poke')));
+        assert.equal(w.via, 'editor');
+        await w.release();
+    } finally {
+        editorProc.kill();
+        await t.done();
+    }
+});
+
+test('"waited N s" counts from the start of the check, process scan included', async () => {
+    const t = await setup({ timings: { editorWaitMs: 5000 } });
+    const editorProc = dummyProcess();
+    try {
+        t.launcher.scanDelayMs = 400;
+        t.launcher.projectProcs = [{ pid: editorProc.pid, name: 'UnrealEditor.exe', startedAt: Date.now() }];
+        setTimeout(() => void t.editor({ pid: editorProc.pid }), 600);
+        const t0 = Date.now();
+        const l = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('poke')));
+        const total = (Date.now() - t0) / 1000;
+        const waited = Number(/waited ([\d.]+) s/.exec(l.notes.join())![1]);
+        // The 0.4 s scan is part of the wait (before this fix it was left out, and waited read ~0).
+        assert.ok(waited >= 0.35 && waited <= total + 0.05, `waited ${waited} s of ${total} s`);
+        await l.release();
     } finally {
         editorProc.kill();
         await t.done();

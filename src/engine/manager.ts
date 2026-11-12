@@ -359,10 +359,15 @@ export class EngineManager {
      */
     private async guardOthers(ws: Workspace, plugin: FoundPlugin, action: ActionSpec, onProgress: StartProgress | undefined, starting: boolean): Promise<Acquired | undefined> {
         if (!action.writes && !starting) return undefined;
+        // Measured from here, so "waited N s" includes the process check.
+        const t0 = this.now();
         const holders = await this.foreignHolders(ws);
         if (!holders.length) return undefined;
+        await this.forgetGiveUpsWithEndpoint(ws, plugin);
         const young = holders.filter(h => h.startedAt === undefined || Date.now() - h.startedAt < this.timings.editorLaunchWindowMs);
-        const h = young[0] ?? holders[0]!;
+        // A process this server already waited the full limit for is not waited for again.
+        const waitable = young.filter(h => !this.gaveUpOn(ws, h.pid));
+        const h = waitable[0] ?? young[0] ?? holders[0]!;
         const refuseWrite = (summary: string, next: string[]) => (action.writes ? refuse('editor-without-endpoint', summary, next, { pid: h.pid }) : undefined);
         // An editor that already serves other plugins of this project, but not this one, is
         // not going to publish this endpoint by waiting.
@@ -372,6 +377,16 @@ export class EngineManager {
                 'Enable the plugin and its DreamMCP endpoint in the editor (or update the plugin), then retry.',
                 'Read-only actions still work.',
             ]);
+        if (young.length && !waitable.length) {
+            const g = this.giveUps.get(EngineManager.key(ws))!.get(h.pid)!;
+            return refuseWrite(
+                `${h.name} (pid ${h.pid}) has this project open and did not publish a DreamMCP endpoint while dream-mcp waited ${Math.round(g.waitedMs / 1000)} s for it. It is not waited for again until it publishes one (or ${Math.max(1, Math.round((g.until - Date.now()) / 60_000))} min from now).`,
+                [
+                    'If the editor is still loading, retry once it has finished: when its endpoint appears, the call goes to it.',
+                    'If that editor has no DreamMCP endpoint (switched off, or an older plugin), close it or enable the endpoint. Read-only actions still work.',
+                ],
+            );
+        }
         if (!young.length) {
             const mins = h.startedAt ? Math.round((Date.now() - h.startedAt) / 60_000) : undefined;
             return refuseWrite(`${h.name} (pid ${h.pid}) has had this project open${mins !== undefined ? ` for ${mins} min` : ''} without a DreamMCP endpoint. Writing from another engine process could overwrite its work.`, [
@@ -379,12 +394,12 @@ export class EngineManager {
                 'Read-only actions still work.',
             ]);
         }
-        const t0 = this.now();
         const deadline = t0 + this.timings.editorWaitMs;
         let lastNote = t0;
         while (this.now() < deadline) {
             const p = await this.probe(ws, plugin.manifest!.id);
             if (p.state === 'alive' && p.disc.mode === 'editor') {
+                this.giveUps.get(EngineManager.key(ws))?.delete(p.disc.pid);
                 const own = this.hosts.get(EngineManager.key(ws));
                 if (own) this.retireWhenIdle(own, 'the editor opened this project');
                 const secs = ((this.now() - t0) / 1000).toFixed(1);
@@ -400,13 +415,44 @@ export class EngineManager {
             }
             await sleep(250);
         }
+        const waitedMs = this.now() - t0;
+        this.rememberGiveUp(ws, h, waitedMs);
         return refuseWrite(
-            `${h.name} (pid ${h.pid}) has this project open, or is still opening it, and its DreamMCP endpoint did not appear within ${Math.round(this.timings.editorWaitMs / 1000)} s. Writing from another engine process now could overwrite what that editor loads or saves.`,
+            `${h.name} (pid ${h.pid}) has this project open, or is still opening it, and its DreamMCP endpoint did not appear in the ${Math.round(waitedMs / 1000)} s dream-mcp waited. Writing from another engine process now could overwrite what that editor loads or saves.`,
             [
                 'If the editor is still loading, wait until it has finished, then retry: it will serve the call.',
                 'If that editor has no DreamMCP endpoint (switched off, or an older plugin), close it or enable the endpoint. Read-only actions still work.',
             ],
         );
+    }
+
+    /** Processes this server waited the full limit for, per project: pid -> until when the verdict stands. */
+    private readonly giveUps = new Map<string, Map<number, { until: number; waitedMs: number }>>();
+
+    private gaveUpOn(ws: Workspace, pid: number): boolean {
+        const g = this.giveUps.get(EngineManager.key(ws))?.get(pid);
+        if (!g) return false;
+        if (Date.now() < g.until && this.launcher.isAlive(pid)) return true;
+        this.giveUps.get(EngineManager.key(ws))!.delete(pid);
+        return false;
+    }
+
+    /** The verdict lasts for the rest of the process's "just started" window. */
+    private rememberGiveUp(ws: Workspace, h: ProjectProcess, waitedMs: number): void {
+        const key = EngineManager.key(ws);
+        let m = this.giveUps.get(key);
+        if (!m) this.giveUps.set(key, (m = new Map()));
+        m.set(h.pid, { until: (h.startedAt ?? Date.now()) + this.timings.editorLaunchWindowMs, waitedMs });
+    }
+
+    /** A discovery file naming the process cancels the verdict: it has an endpoint after all. */
+    private async forgetGiveUpsWithEndpoint(ws: Workspace, plugin: FoundPlugin): Promise<void> {
+        const m = this.giveUps.get(EngineManager.key(ws));
+        if (!m?.size) return;
+        for (const p of ws.discovery.active.length ? ws.discovery.active : [plugin]) {
+            const disc = await readJsonSettled(discoveryFile(ws.dir, p.manifest!.id), 1, 0);
+            if (isDiscovery(disc)) m.delete(disc.pid);
+        }
     }
 
     private readonly holderCache = new Map<string, { sig: string; checkedAt: number; scannedAt: number; holders: ProjectProcess[] }>();

@@ -177,8 +177,12 @@ export class FakeLauncher implements ProcessLauncher {
     /** How many times the expensive command-line scan ran. */
     projectScans = 0;
 
+    /** Make the command-line scan take this long, like the real one. */
+    scanDelayMs = 0;
+
     async projectProcesses(): Promise<ProjectProcess[]> {
         this.projectScans++;
+        if (this.scanDelayMs) await new Promise(r => setTimeout(r, this.scanDelayMs));
         return this.projectProcs;
     }
 
