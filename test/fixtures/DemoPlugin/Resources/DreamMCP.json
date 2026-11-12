@@ -1,0 +1,94 @@
+{
+  "schema": 1,
+  "protocol": 1,
+  "id": "demo",
+  "plugin": "DemoPlugin",
+  "title": "Demo",
+  "description": "A stand-in plugin for the dream-mcp tests. Use this tool to exercise every protocol path; it has a toy language in .dmo files.",
+  "route": "/dream/demo",
+  "host": { "commandlet": "DemoHost" },
+  "extensions": [".dmo"],
+  "sourceRoots": ["Demo"],
+  "reference": [
+    { "title": "Demo language", "path": "Docs/language.md" },
+    { "title": "Node catalog", "path": "Docs/nodes.md" }
+  ],
+  "actions": [
+    {
+      "name": "echo",
+      "description": "Echo the text back. Writes nothing.",
+      "needs": "engine",
+      "writes": false,
+      "long": false,
+      "args": {
+        "type": "object",
+        "properties": { "text": { "type": "string", "description": "Text to echo." } },
+        "required": ["text"]
+      }
+    },
+    {
+      "name": "fail",
+      "description": "Check a file and report a source error. Writes nothing.",
+      "needs": "engine",
+      "args": {
+        "type": "object",
+        "properties": { "file": { "type": "string", "description": "Source path relative to the project root." } },
+        "required": ["file"]
+      }
+    },
+    {
+      "name": "build",
+      "description": "Build one source file into an asset and save it.",
+      "needs": "engine",
+      "writes": true,
+      "long": true,
+      "args": {
+        "type": "object",
+        "properties": {
+          "file": { "type": "string", "description": "Source path relative to the project root." },
+          "steps": { "type": "integer", "description": "How many progress steps to report." },
+          "stepMs": { "type": "integer", "description": "Milliseconds per step." }
+        },
+        "required": ["file"]
+      }
+    },
+    {
+      "name": "snap",
+      "description": "Render a preview image of a file. Writes nothing.",
+      "needs": "render",
+      "long": true,
+      "args": {
+        "type": "object",
+        "properties": { "file": { "type": "string", "description": "Source path relative to the project root." } },
+        "required": ["file"]
+      }
+    },
+    { "name": "slow", "description": "A long action that can be cancelled.", "needs": "engine", "long": true, "args": { "type": "object", "properties": {} } },
+    { "name": "stuck", "description": "A long action that cannot be cancelled.", "needs": "engine", "long": true, "args": { "type": "object", "properties": {} } },
+    {
+      "name": "poke",
+      "description": "A short write that takes a while.",
+      "needs": "engine",
+      "writes": true,
+      "args": { "type": "object", "properties": { "ms": { "type": "integer", "description": "How long to take." } } }
+    },
+    {
+      "name": "lookup",
+      "description": "Describe one node from the catalog. Answered from files.",
+      "needs": "none",
+      "offline": { "kind": "readFile", "path": "Docs/nodes/{name}.md" },
+      "args": {
+        "type": "object",
+        "properties": { "name": { "type": "string", "description": "Node name, for example Floor." } },
+        "required": ["name"]
+      }
+    },
+    {
+      "name": "files",
+      "description": "List the demo sources in the project. Answered from files.",
+      "needs": "none",
+      "offline": { "kind": "listFiles", "path": "Demo/**/*.dmo", "base": "project" },
+      "args": { "type": "object", "properties": {} }
+    }
+  ]
+}
