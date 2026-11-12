@@ -159,7 +159,8 @@ from the manifest; the server adds two to every plugin tool:
 - `reference(doc?, offset?, limit?)`: list the plugin's reference docs, or read one in
   pages. The docs are also MCP resources (`dream://<id>/reference/<path>`).
 
-Results start with a one-line summary, then one line per diagnostic
+Results start with a one-line summary, then any pre-formatted text the plugin sends (a
+layout tree, say), one line per diagnostic
 (`error CODE file:line:col message (hint: …)`), the assets written, and what to do next.
 The full result is attached as structured content, and preview images come back as image
 content.

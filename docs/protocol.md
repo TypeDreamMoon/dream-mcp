@@ -167,10 +167,20 @@ project is still held by something.
   "writes": [ { "asset": "/Game/UI/Panel", "state": "memory" } ],
   "artifacts": [ { "kind": "image", "path": "Saved/DreamMCP/artifacts/<job>.png", "title": "…" } ],
   "data": { },
-  "next": [ "What the model should do next, one sentence each." ]
+  "next": [ "What the model should do next, one sentence each." ],
+  "text": "Optional. Pre-formatted lines for the model,\n  indentation and line breaks kept."
 }
 ```
 
+- `summary` is **one line** (no line breaks). Anything multi-line goes in `text`.
+- `text` (optional, an extension within protocol 1; endpoints that do not send it are valid):
+  a pre-formatted plain-text block for a model that cannot see images, such as an indented
+  tree with one widget per line. dream-mcp shows it verbatim right after the summary and
+  before the diagnostics, never parses or rewrites it (only trailing blank lines are
+  dropped), and keeps it unchanged in the structured content. Past **20,000 characters** it
+  is cut at a line end and followed by one line saying how many lines and characters were
+  shown; say in `next` how to ask for a smaller part (a subtree, a depth limit). `text` does
+  not count towards the `data` limits below.
 - `outcome`: `ok`; `source-error` (the source is wrong; fix the source); `refused` (not the
   source's fault: the asset is open in the editor, held by someone else, bad arguments…;
   `reason` carries a stable machine code); `engine-error` (an internal failure). The server
@@ -182,8 +192,8 @@ project is still held by something.
 - Large outputs such as images go to `<Project>/Saved/DreamMCP/artifacts/`; the result gives
   the relative path, and the server returns images as MCP image content.
 
-How dream-mcp shows a result to the model: the first text block is the summary, one line
-per diagnostic, the writes, one line per artifact path (left out when the summary already
+How dream-mcp shows a result to the model: the first text block is the summary, the `text`
+block if there is one, one line per diagnostic, the writes, one line per artifact path (left out when the summary already
 names it), notes and `next`. The complete body is the structured content. `data` is also
 repeated in the text, within these limits:
 
@@ -232,6 +242,20 @@ never put on the command line.
 - A windowless editor's first start (shader compilation, DDC warm-up) is slower than a
   commandlet's. While a host starts, dream-mcp sends MCP progress notifications every few
   seconds and waits up to `DREAM_MCP_START_TIMEOUT_MS` (default 10 minutes).
+
+### 3.1 Several Dream endpoints in one process
+
+This is a convention between plugins inside the engine process; dream-mcp itself does not
+see it.
+
+- A host throttles its frame rate while idle (for example `t.MaxFPS=15`) to save power. If
+  each plugin did that on its own, one plugin going idle would slow down a job another
+  plugin is still running.
+- So the endpoints share one integer console variable, **`DreamMCP.BusyEndpoints`**: the
+  number of endpoints in the process that are running a job right now. The first plugin to
+  start registers it; a plugin that finds it already registered reuses it. Each endpoint
+  adds one when it starts a job and subtracts one when the job ends.
+- In host mode, the idle frame-rate limit applies only while `DreamMCP.BusyEndpoints` is 0.
 
 ## 4. How the server routes a call
 
