@@ -577,3 +577,27 @@ test('every built-in and core action answers in full in the structured content, 
         await p.cleanup();
     }
 });
+
+test('a call served by a different engine process than the previous one says that earlier engine state did not carry over', async () => {
+    const p = await makeProject({ fixtures: ['DemoPlugin'] });
+    const c = await connect(p);
+    try {
+        await c.call('dream_workspace', 'add', { project: p.uproject, mode: 'headless' });
+        const first = await c.call('dream_demo', 'fail', { file: 'Demo/a.dmo' });
+        assert.doesNotMatch(c.text(first), /different engine process/);
+        const same = await c.call('dream_demo', 'echo', { text: 'x' });
+        assert.doesNotMatch(c.text(same), /different engine process/);
+        await c.call('dream_demo', 'snap', { file: 'Demo/a.dmo' }); // temporary rendering process
+        const after = await c.call('dream_demo', 'echo', { text: 'y' }); // a fresh headless host
+        assert.match(
+            c.text(after),
+            /This call ran in a different engine process \(pid \d+\) from the previous call \(pid \d+\); state kept by the engine, such as diagnostics from earlier checks, did not carry over\. Run the check again/,
+        );
+        assert.ok((after.structuredContent!.next as string[]).some(n => /different engine process/.test(n)));
+        const again = await c.call('dream_demo', 'echo', { text: 'z' });
+        assert.doesNotMatch(c.text(again), /different engine process/);
+    } finally {
+        await c.done();
+        await p.cleanup();
+    }
+});
