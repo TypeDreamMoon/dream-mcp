@@ -6,8 +6,50 @@ import { isInside } from '../util/fs.js';
 
 const IMAGE_TYPES: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' };
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
-/** How much of a result's data object is repeated in the text. */
-const DATA_TEXT_LIMIT = 4000;
+/**
+ * How much of a result's `data` object the text repeats (it is always complete in the
+ * structured content):
+ * - a result that is only an answer (no diagnostics, writes or artifacts, as from a lookup)
+ *   repeats `data` in full up to DATA_ANSWER_LIMIT characters;
+ * - any other result repeats it in full up to DATA_FULL_LIMIT characters, and otherwise
+ *   gives a summary of its first fields, at most DATA_SUMMARY_LIMIT characters.
+ */
+export const DATA_ANSWER_LIMIT = 12_000;
+export const DATA_FULL_LIMIT = 1_000;
+export const DATA_SUMMARY_LIMIT = 600;
+
+/** `key: value; key: [12 items]; key: {a, b, c}` -- the shape of an object, not its contents. */
+function summarize(data: Record<string, unknown>): string {
+    const brief = (v: unknown): string => {
+        if (v === null || typeof v !== 'object') {
+            const s = JSON.stringify(v) ?? String(v);
+            return s.length > 80 ? `${s.slice(0, 77)}…"` : s;
+        }
+        if (Array.isArray(v)) {
+            if (v.length && v.length <= 4 && v.every(x => x === null || typeof x !== 'object')) return JSON.stringify(v);
+            return `[${v.length} item${v.length === 1 ? '' : 's'}]`;
+        }
+        const keys = Object.keys(v);
+        return `{${keys.slice(0, 6).join(', ')}${keys.length > 6 ? `, … ${keys.length - 6} more` : ''}}`;
+    };
+    let out = '';
+    for (const [k, v] of Object.entries(data)) {
+        const part = `${out ? '; ' : ''}${k}: ${brief(v)}`;
+        if (out.length + part.length > DATA_SUMMARY_LIMIT) return `${out}; …`;
+        out += part;
+    }
+    return out;
+}
+
+export function dataText(result: ResultBody): string | undefined {
+    if (!Object.keys(result.data).length) return undefined;
+    const json = JSON.stringify(result.data);
+    const answer = !result.diagnostics.length && !result.writes.length && !result.artifacts.length;
+    if (json.length <= (answer ? DATA_ANSWER_LIMIT : DATA_FULL_LIMIT)) return `data: ${json}`;
+    if (answer)
+        return `data (first ${DATA_ANSWER_LIMIT} of ${json.length} characters; the complete object is the "data" field of the structured content): ${json.slice(0, DATA_ANSWER_LIMIT)}…`;
+    return `data (summary of ${json.length} characters; the complete object is the "data" field of the structured content): ${summarize(result.data)}`;
+}
 
 export function textResult(text: string, isError = false, structured?: Record<string, unknown>): CallToolResult {
     return { content: [{ type: 'text', text }], ...(structured ? { structuredContent: structured } : {}), ...(isError ? { isError: true } : {}) };
@@ -36,24 +78,19 @@ export async function renderResult(result: ResultBody, opts: { projectDir?: stri
     }
     if (result.writes.length) lines.push('Writes: ' + result.writes.map(w => `${w.asset} (${w.state})`).join(', '));
     // Paths in the text too: not every client hands structured content to the model.
-    for (const a of result.artifacts) lines.push(`${a.kind === 'image' ? 'Image' : `Artifact (${a.kind})`}: ${a.path}${a.title ? ` (${a.title})` : ''}`);
+    // Once is enough: skip a path the endpoint's summary already names.
+    for (const a of result.artifacts) {
+        if (lines.some(l => l.includes(a.path))) continue;
+        lines.push(`${a.kind === 'image' ? 'Image' : `Artifact (${a.kind})`}: ${a.path}${a.title ? ` (${a.title})` : ''}`);
+    }
     for (const n of opts.notes ?? []) lines.push('Note: ' + n);
     if (result.next.length) {
         lines.push('Next:');
         for (const n of result.next) lines.push('  - ' + n);
     }
     const content: CallToolResult['content'] = [{ type: 'text', text: lines.join('\n') }];
-    if (Object.keys(result.data).length) {
-        // Compact, and capped: the full object is in the structured content anyway.
-        const json = JSON.stringify(result.data);
-        content.push({
-            type: 'text',
-            text:
-                json.length <= DATA_TEXT_LIMIT
-                    ? `data: ${json}`
-                    : `data (first ${DATA_TEXT_LIMIT} of ${json.length} characters; the complete object is the "data" field of the structured content): ${json.slice(0, DATA_TEXT_LIMIT)}…`,
-        });
-    }
+    const data = dataText(result);
+    if (data) content.push({ type: 'text', text: data });
 
     for (const a of result.artifacts) {
         const ext = path.extname(a.path).toLowerCase();

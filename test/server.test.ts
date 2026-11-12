@@ -439,20 +439,21 @@ test('a job whose engine died is reported as failed and does not linger in statu
     }
 });
 
-test('text output: artifact paths are listed, data is compact and capped', async () => {
+test('text output through the tools: artifact path once, an answer\'s data in full', async () => {
     const p = await makeProject({ fixtures: ['DemoPlugin'] });
     const editor = await openEditor(p);
     const c = await connect(p);
     try {
         const snap = await c.call('dream_demo', 'snap', { file: 'Demo/a.dmo' });
         assert.match(c.text(snap), /^Image: Saved\/DreamMCP\/artifacts\/job-[0-9a-f]+\.png \(preview\)$/m);
+        assert.equal(c.text(snap).match(/Saved\/DreamMCP\/artifacts\//g)?.length, 1);
         const echo = await c.call('dream_demo', 'echo', { text: 'hi' });
         const dataText = echo.content.filter(x => x.type === 'text')[1]!.text!;
         assert.match(dataText, /^data: \{"text":"hi","mode":"editor","pid":\d+\}$/);
+        // echo's result is only an answer, so its data is repeated in full well past the summary limit.
         const big = await c.call('dream_demo', 'echo', { text: 'x'.repeat(6000) });
         const bigText = big.content.filter(x => x.type === 'text')[1]!.text!;
-        assert.match(bigText, /^data \(first 4000 of \d+ characters; the complete object is the "data" field of the structured content\)/);
-        assert.ok(bigText.length < 4300);
+        assert.ok(bigText.startsWith('data: {') && bigText.includes('x'.repeat(6000)));
         assert.equal(((big.structuredContent!.data as { text: string }).text).length, 6000);
     } finally {
         await c.done();

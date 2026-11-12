@@ -182,6 +182,19 @@ project is still held by something.
 - Large outputs such as images go to `<Project>/Saved/DreamMCP/artifacts/`; the result gives
   the relative path, and the server returns images as MCP image content.
 
+How dream-mcp shows a result to the model: the first text block is the summary, one line
+per diagnostic, the writes, one line per artifact path (left out when the summary already
+names it), notes and `next`. The complete body is the structured content. `data` is also
+repeated in the text, within these limits:
+
+| Result | `data` in the text |
+|---|---|
+| Only an answer (no diagnostics, writes or artifacts, e.g. a lookup) | in full up to 12,000 characters, then cut |
+| Anything else | in full up to 1,000 characters; longer, a summary of its first fields (at most 600 characters: values, array lengths, object keys) |
+
+So put what the model must read in `summary`, `diagnostics` and `next`, and keep `data` for
+detail; an answer-style action can rely on its `data` reaching the model.
+
 ## 3. Host processes
 
 When no editor serves the project, the server starts a **host**: an Unreal process it owns,
