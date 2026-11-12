@@ -193,17 +193,33 @@ project is still held by something.
   the relative path, and the server returns images as MCP image content.
 
 How dream-mcp shows a result to the model: the first text block is the summary, the `text`
-block if there is one, one line per diagnostic, the writes, one line per artifact path (left out when the summary already
-names it), notes and `next`. The complete body is the structured content. `data` is also
-repeated in the text, within these limits:
+block if there is one, one line per diagnostic, the writes, one line per artifact path (left
+out when the summary already names it), notes and `next`. The complete body is the
+structured content, plus `notes` (what dream-mcp itself adds, such as how long an engine
+took to start) and `engine` (which process served the call).
+
+Both kinds of client get everything: some show the model the text content, others (agents
+that call tools from code) give it only the structured content. Whatever the text says is
+also in the structured content; for dream-mcp's own answers (`help`, `reference`, offline
+actions, `dream_workspace`, `dream_engine`) the whole text is its `text` field.
+
+`data` is also repeated in the text, within these limits:
 
 | Result | `data` in the text |
 |---|---|
+| Has a `text` block | not repeated (the text block is what the model reads) |
 | Only an answer (no diagnostics, writes or artifacts, e.g. a lookup) | in full up to 12,000 characters, then cut |
 | Anything else | in full up to 1,000 characters; longer, a summary of its first fields (at most 600 characters: values, array lengths, object keys) |
 
-So put what the model must read in `summary`, `diagnostics` and `next`, and keep `data` for
-detail; an answer-style action can rely on its `data` reaching the model.
+So put what the model must read in `summary`, `text`, `diagnostics` and `next`, and keep
+`data` for detail; an answer-style action without `text` can rely on its `data` reaching the
+model.
+
+When a call is served by a different engine process from the previous call in the same
+project (a temporary rendering process, a restarted host, the editor taking over), dream-mcp
+adds a `next` line saying that state the engine kept, such as diagnostics from earlier
+checks, did not carry over. An endpoint that answers from such state should say so plainly
+when it has none (for example "nothing checked since this process started").
 
 ## 3. Host processes
 

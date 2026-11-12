@@ -478,3 +478,126 @@ test('a result text block reaches the model verbatim and stays in the structured
         await p.cleanup();
     }
 });
+
+/** Every string anywhere in a value, so a line of text can be looked up in it. */
+function strings(v: unknown): string {
+    if (typeof v === 'string') return v;
+    if (Array.isArray(v)) return v.map(strings).join('\n');
+    if (v && typeof v === 'object') return Object.values(v).map(strings).join('\n');
+    return v === undefined || v === null ? '' : String(v);
+}
+
+/**
+ * Code-mode clients hand the model only the structured content. Check that it alone says
+ * everything the text content says.
+ */
+function assertSelfSufficient(r: ToolResult, what: string): void {
+    const sc = r.structuredContent;
+    assert.ok(sc, `${what}: no structured content`);
+    const texts = r.content.filter(c => c.type === 'text').map(c => c.text!);
+    const all = strings(sc);
+    if (typeof sc.outcome !== 'string') {
+        assert.equal(sc.text, texts.join('\n'), `${what}: structured text differs from the text content`);
+        return;
+    }
+    // A result body: check it line by line.
+    const diags = (sc.diagnostics as unknown[]) ?? [];
+    let inDiagnostics = false;
+    for (const raw of texts[0]!.split('\n')) {
+        const line = raw.replace(/^\[[a-z-]+(: [a-z-]+)?\] /, '');
+        if (!line.trim() || line === 'Next:') continue;
+        if (/^Diagnostics \(\d+\):$/.test(line)) {
+            assert.equal(Number(/\d+/.exec(line)![0]), diags.length, `${what}: diagnostic count`);
+            inDiagnostics = true;
+            continue;
+        }
+        if (inDiagnostics && raw.startsWith('  ') && !raw.startsWith('  - ')) continue;
+        inDiagnostics = false;
+        const body = line.replace(/^(Note: | {2}- |Image: |Writes: )/, '');
+        for (const piece of body.split(/, (?=\/)/)) {
+            const key = piece.replace(/ \((saved|memory|created|deleted)\)$/, '');
+            assert.ok(all.includes(key), `${what}: "${key}" is in the text but not in the structured content`);
+        }
+    }
+    if (texts[1]?.startsWith('data')) assert.ok(sc.data && Object.keys(sc.data as object).length, `${what}: data`);
+}
+
+test('every built-in and core action answers in full in the structured content, for code-mode clients', async () => {
+    const p = await makeProject({ fixtures: ['DemoPlugin'] });
+    const c = await connect(p, { timings: { jobWaitMs: 150 } });
+    try {
+        const calls: [string, string, Record<string, unknown>][] = [
+            ['dream_demo', 'help', {}],
+            ['dream_demo', 'help', { action: 'build' }],
+            ['dream_demo', 'reference', {}],
+            ['dream_demo', 'reference', { doc: 'Demo language' }],
+            ['dream_demo', 'reference', { doc: '1', offset: 0, limit: 2 }],
+            ['dream_demo', 'reference', { doc: 'nope' }],
+            ['dream_demo', 'lookup', { name: 'Floor' }],
+            ['dream_demo', 'lookup', { name: 'Nope' }],
+            ['dream_demo', 'files', {}],
+            ['dream_demo', 'explode', {}],
+            ['dream_demo', 'echo', {}],
+            ['dream_demo', 'echo', { text: 'cold' }],
+            ['dream_demo', 'fail', { file: 'Demo/a.dmo' }],
+            ['dream_demo', 'build', { file: 'Demo/a.dmo', steps: 1, stepMs: 10 }],
+            ['dream_workspace', 'status', {}],
+            ['dream_workspace', 'list', {}],
+            ['dream_workspace', 'add', { project: p.uproject, name: 'Game' }],
+            ['dream_workspace', 'list', {}],
+            ['dream_workspace', 'doctor', {}],
+            ['dream_workspace', 'use', { project: p.uproject }],
+            ['dream_workspace', 'explode', {}],
+            ['dream_engine', 'status', {}],
+            ['dream_engine', 'logs', { lines: 5 }],
+            ['dream_engine', 'start', {}],
+            ['dream_engine', 'job', { job: 'nope' }],
+            ['dream_engine', 'explode', {}],
+        ];
+        for (const [tool, action, args] of calls) assertSelfSufficient(await c.call(tool, action, args), `${tool} ${action} ${JSON.stringify(args)}`);
+
+        // A job that outlasts the wait, then picked up and cancelled.
+        const slow = await c.call('dream_demo', 'slow');
+        assertSelfSufficient(slow, 'still running');
+        assert.match(String(slow.structuredContent!.text), /still running \(job job-/);
+        const job = slow.structuredContent!.job as string;
+        assertSelfSufficient(await c.call('dream_engine', 'job', { job }), 'job (still running)');
+        assertSelfSufficient(await c.call('dream_engine', 'cancel', { job }), 'cancel');
+
+        // The reference body and an offline answer are in the structured content.
+        const ref = await c.call('dream_demo', 'reference', { doc: 'Demo language' });
+        assert.match(String(ref.structuredContent!.text), /A \.dmo file is a list of nodes/);
+        const node = await c.call('dream_demo', 'lookup', { name: 'Floor' });
+        assert.match(String(node.structuredContent!.text), /Rounds down/);
+
+        for (const action of ['restart', 'stop']) assertSelfSufficient(await c.call('dream_engine', action), `dream_engine ${action}`);
+        assertSelfSufficient(await c.call('dream_workspace', 'remove', { project: 'Game' }), 'dream_workspace remove');
+    } finally {
+        await c.done();
+        await p.cleanup();
+    }
+});
+
+test('a call served by a different engine process than the previous one says that earlier engine state did not carry over', async () => {
+    const p = await makeProject({ fixtures: ['DemoPlugin'] });
+    const c = await connect(p);
+    try {
+        await c.call('dream_workspace', 'add', { project: p.uproject, mode: 'headless' });
+        const first = await c.call('dream_demo', 'fail', { file: 'Demo/a.dmo' });
+        assert.doesNotMatch(c.text(first), /different engine process/);
+        const same = await c.call('dream_demo', 'echo', { text: 'x' });
+        assert.doesNotMatch(c.text(same), /different engine process/);
+        await c.call('dream_demo', 'snap', { file: 'Demo/a.dmo' }); // temporary rendering process
+        const after = await c.call('dream_demo', 'echo', { text: 'y' }); // a fresh headless host
+        assert.match(
+            c.text(after),
+            /This call ran in a different engine process \(pid \d+\) from the previous call \(pid \d+\); state kept by the engine, such as diagnostics from earlier checks, did not carry over\. Run the check again/,
+        );
+        assert.ok((after.structuredContent!.next as string[]).some(n => /different engine process/.test(n)));
+        const again = await c.call('dream_demo', 'echo', { text: 'z' });
+        assert.doesNotMatch(c.text(again), /different engine process/);
+    } finally {
+        await c.done();
+        await p.cleanup();
+    }
+});

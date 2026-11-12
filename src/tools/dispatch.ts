@@ -163,8 +163,26 @@ export class Dispatcher {
         await p;
     }
 
+    /** Which engine process served the last call per project, to notice a switch. */
+    private readonly lastServer = new Map<string, number>();
+
     private render(ws: Workspace, result: ResultBody, lease: Lease): Promise<CallToolResult> {
-        const r = lease.next.length ? { ...result, next: [...lease.next, ...result.next] } : result;
+        // State an engine keeps between calls (standing diagnostics, say) lives in that
+        // process. When the serving process changes -- a temporary rendering process, a
+        // restarted host, the editor taking over -- say so, so the model does not trust an
+        // empty answer about earlier work. dream-mcp cannot carry that state over itself:
+        // only the plugin knows what it means.
+        const key = ws.uproject.toLowerCase();
+        const prev = this.lastServer.get(key);
+        this.lastServer.set(key, lease.pid);
+        const switched =
+            prev !== undefined && prev !== lease.pid
+                ? [
+                      `This call ran in a different engine process (pid ${lease.pid}) from the previous call (pid ${prev}); state kept by the engine, such as diagnostics from earlier checks, did not carry over. Run the check again on the files you are working on before relying on it.`,
+                  ]
+                : [];
+        const next = [...lease.next, ...switched, ...result.next];
+        const r = next.length !== result.next.length ? { ...result, next } : result;
         return renderResult(r, { projectDir: ws.dir, notes: lease.notes, extra: { engine: { via: lease.via, pid: lease.pid } } });
     }
 

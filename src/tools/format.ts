@@ -9,6 +9,7 @@ const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 /**
  * How much of a result's `data` object the text repeats (it is always complete in the
  * structured content):
+ * - a result with a `text` block does not repeat `data` at all;
  * - a result that is only an answer (no diagnostics, writes or artifacts, as from a lookup)
  *   repeats `data` in full up to DATA_ANSWER_LIMIT characters;
  * - any other result repeats it in full up to DATA_FULL_LIMIT characters, and otherwise
@@ -61,6 +62,9 @@ function summarize(data: Record<string, unknown>): string {
 
 export function dataText(result: ResultBody): string | undefined {
     if (!Object.keys(result.data).length) return undefined;
+    // A result that brings its own text for the model does not need its data repeated as
+    // well; data stays complete in the structured content.
+    if (result.text) return undefined;
     const json = JSON.stringify(result.data);
     const answer = !result.diagnostics.length && !result.writes.length && !result.artifacts.length;
     if (json.length <= (answer ? DATA_ANSWER_LIMIT : DATA_FULL_LIMIT)) return `data: ${json}`;
@@ -69,8 +73,13 @@ export function dataText(result: ResultBody): string | undefined {
     return `data (summary of ${json.length} characters; the complete object is the "data" field of the structured content): ${summarize(result.data)}`;
 }
 
+/**
+ * A plain answer. The same words go in the text content and in the structured content's
+ * `text`: some clients (code-mode agents) hand the model only the structured content, and
+ * it must be able to answer from that alone.
+ */
 export function textResult(text: string, isError = false, structured?: Record<string, unknown>): CallToolResult {
-    return { content: [{ type: 'text', text }], ...(structured ? { structuredContent: structured } : {}), ...(isError ? { isError: true } : {}) };
+    return { content: [{ type: 'text', text }], structuredContent: { ...(structured ?? {}), text }, ...(isError ? { isError: true } : {}) };
 }
 
 /** One line per diagnostic: `error ABC1234 Source/Dir/File.ext:12:5 message (hint: ...) <doc>` */
@@ -112,6 +121,7 @@ export async function renderResult(result: ResultBody, opts: { projectDir?: stri
     const data = dataText(result);
     if (data) content.push({ type: 'text', text: data });
 
+    const imageNotes: string[] = [];
     for (const a of result.artifacts) {
         const ext = path.extname(a.path).toLowerCase();
         const mime = IMAGE_TYPES[ext];
@@ -121,14 +131,19 @@ export async function renderResult(result: ResultBody, opts: { projectDir?: stri
         try {
             const stat = await fs.stat(full);
             if (stat.size > MAX_IMAGE_BYTES) {
-                content.push({ type: 'text', text: `Image ${a.path} is ${Math.round(stat.size / 1048576)} MB; not inlined.` });
+                imageNotes.push(`Image ${a.path} is ${Math.round(stat.size / 1048576)} MB; not inlined.`);
+                content.push({ type: 'text', text: imageNotes[imageNotes.length - 1]! });
                 continue;
             }
             content.push({ type: 'image', data: (await fs.readFile(full)).toString('base64'), mimeType: mime });
         } catch {
-            content.push({ type: 'text', text: `Image ${a.path} was reported but cannot be read.` });
+            imageNotes.push(`Image ${a.path} was reported but cannot be read.`);
+            content.push({ type: 'text', text: imageNotes[imageNotes.length - 1]! });
         }
     }
     const isError = result.outcome === 'refused' || result.outcome === 'engine-error';
-    return { content, structuredContent: { ...result, ...(opts.extra ?? {}) } as Record<string, unknown>, ...(isError ? { isError: true } : {}) };
+    // Everything the text says is also in the structured content (see textResult).
+    const notes = [...(opts.header ? [opts.header] : []), ...(opts.notes ?? []), ...imageNotes];
+    const structured = { ...result, ...(notes.length ? { notes } : {}), ...(opts.extra ?? {}) };
+    return { content, structuredContent: structured as Record<string, unknown>, ...(isError ? { isError: true } : {}) };
 }
