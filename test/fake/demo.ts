@@ -9,9 +9,22 @@ export const PNG_1X1 = Buffer.from(
     'base64',
 );
 
+/** An indented layout-style tree: `Panel_3 at (30, 12) size 200x40`, nested two deep. */
+export function demoTree(lines: number): string {
+    const out: string[] = [];
+    for (let i = 0; i < lines; i++) out.push(`${'  '.repeat(i % 3)}${i % 3 === 0 ? 'Panel' : 'Text'}_${i} at (${i * 10}, ${i * 2}) size 200x40`);
+    return out.join('\n');
+}
+
 export function demoBehaviors(engine: FakeEngine): Record<string, Behavior> {
     return {
-        echo: { run: args => result('ok', `echo: ${String(args.text)}`, { data: { text: args.text, mode: engine.opts.mode, pid: engine.pid } }) },
+        echo: {
+            run: args =>
+                result('ok', `echo: ${String(args.text)}`, {
+                    data: { text: args.text, mode: engine.opts.mode, pid: engine.pid },
+                    ...(args.tree ? { text: demoTree(Number(args.tree)) } : {}),
+                }),
+        },
         fail: {
             run: args =>
                 result('source-error', 'One error in the source.', {

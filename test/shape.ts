@@ -17,6 +17,8 @@ export function resultProblems(body: unknown): string[] {
     if (!(r.reason === null || typeof r.reason === 'string')) out.push('reason must be a string or null');
     if (r.outcome === 'refused' && typeof r.reason !== 'string') out.push('a refusal needs a machine-readable reason');
     if (typeof r.summary !== 'string' || !r.summary) out.push('summary must be a non-empty string');
+    else if (/[\r\n]/.test(r.summary)) out.push('summary must be one line (put multi-line output in "text")');
+    if (r.text !== undefined && typeof r.text !== 'string') out.push('text, when present, must be a string');
     for (const k of ['diagnostics', 'writes', 'artifacts', 'next']) if (!Array.isArray(r[k])) out.push(`${k} must be an array`);
     if (typeof r.data !== 'object' || r.data === null || Array.isArray(r.data)) out.push('data must be an object');
     for (const d of (r.diagnostics as Record<string, unknown>[]) ?? []) {

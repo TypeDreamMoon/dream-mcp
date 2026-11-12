@@ -18,6 +18,24 @@ export const DATA_ANSWER_LIMIT = 12_000;
 export const DATA_FULL_LIMIT = 1_000;
 export const DATA_SUMMARY_LIMIT = 600;
 
+/**
+ * A result's optional `text` block is shown verbatim up to this many characters (enough for
+ * a layout tree of several hundred nodes), cut at a line boundary beyond that.
+ */
+export const TEXT_LIMIT = 20_000;
+
+/** The `text` block as shown: verbatim, or cut at a line end with a line saying how much was left out. */
+export function textBlock(text: string): string {
+    const trimmed = text.replace(/\s+$/, '');
+    if (trimmed.length <= TEXT_LIMIT) return trimmed;
+    let cut = trimmed.lastIndexOf('\n', TEXT_LIMIT);
+    if (cut <= 0) cut = TEXT_LIMIT;
+    const shown = trimmed.slice(0, cut).replace(/\s+$/, '');
+    const totalLines = trimmed.split('\n').length;
+    const shownLines = shown.split('\n').length;
+    return `${shown}\n[text cut: showed ${shownLines} of ${totalLines} lines (${shown.length} of ${trimmed.length} characters). The full text is the "text" field of the structured content; Next says how to ask for less.]`;
+}
+
 /** `key: value; key: [12 items]; key: {a, b, c}` -- the shape of an object, not its contents. */
 function summarize(data: Record<string, unknown>): string {
     const brief = (v: unknown): string => {
@@ -71,6 +89,8 @@ export async function renderResult(result: ResultBody, opts: { projectDir?: stri
     if (opts.header) lines.push(opts.header);
     const status = result.outcome === 'ok' ? '' : `[${result.outcome}${result.reason ? `: ${result.reason}` : ''}] `;
     lines.push(status + (result.summary || (result.ok ? 'Done.' : 'Failed.')));
+    // Pre-formatted text from the endpoint, after the summary and before diagnostics, as is.
+    if (result.text) lines.push(textBlock(result.text));
     if (result.diagnostics.length) {
         lines.push(`Diagnostics (${result.diagnostics.length}):`);
         for (const d of result.diagnostics.slice(0, 200)) lines.push('  ' + diagnosticLine(d));

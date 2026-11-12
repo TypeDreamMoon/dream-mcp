@@ -147,7 +147,7 @@ claude mcp add dream -- npx -y github:TypeDreamMoon/dream-mcp
 - `reference(doc?, offset?, limit?)`:列出插件的参考文档,或分页读一篇。这些文档也作为
   MCP 资源提供(`dream://<id>/reference/<路径>`)。
 
-结果先给一行摘要,然后每条诊断一行(`error 代码 文件:行:列 消息 (hint: …)`)、写了哪些资产、
+结果先给一行摘要,然后是插件给的预格式化文本(比如布局树,如果有),每条诊断一行(`error 代码 文件:行:列 消息 (hint: …)`)、写了哪些资产、
 下一步做什么。完整结果作为结构化内容附上,预览图作为图片内容返回。
 
 ## 调用怎么分派

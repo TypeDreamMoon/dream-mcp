@@ -36,6 +36,11 @@ export interface ResultBody {
     artifacts: ArtifactRecord[];
     data: Record<string, unknown>;
     next: string[];
+    /**
+     * Optional (protocol 1 extension): a pre-formatted, multi-line plain-text block for the
+     * model, shown verbatim after the summary. Endpoints that do not send it are valid.
+     */
+    text?: string;
 }
 
 export interface Discovery {
@@ -96,6 +101,7 @@ export function normalizeResult(raw: unknown): ResultBody {
         artifacts: arr<ArtifactRecord>(r.artifacts).filter(a => a && typeof a.path === 'string'),
         data: typeof r.data === 'object' && r.data !== null && !Array.isArray(r.data) ? r.data : {},
         next: arr<string>(r.next).filter(s => typeof s === 'string'),
+        ...(typeof r.text === 'string' && r.text.length ? { text: r.text } : {}),
     };
 }
 
