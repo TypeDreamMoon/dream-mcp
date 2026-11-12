@@ -163,6 +163,8 @@ Results start with a one-line summary, then any pre-formatted text the plugin se
 layout tree, say), one line per diagnostic
 (`error CODE file:line:col message (hint: …)`), the assets written, and what to do next.
 The full result is attached as structured content, and preview images come back as image
+content. Clients that show the model only the structured content (agents that call tools
+from code) are supported as well: everything the text says is also in the structured
 content.
 
 ## How calls are routed
