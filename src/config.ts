@@ -35,6 +35,10 @@ export interface Timings {
     stopMs: number;
     /** How often the list of other Unreal processes is refreshed while one of our hosts runs. */
     holderRefreshMs: number;
+    /** How long after its `startedAt` an editor endpoint that does not answer is taken to be still starting. */
+    editorStartWindowMs: number;
+    /** With no host of ours to fall back on, how long to wait for a starting editor before calling it unresponsive. */
+    editorWarmupMs: number;
     /** How long a write waits for an editor that is opening the project to publish its endpoint. */
     editorWaitMs: number;
     /** How often a starting host reports that it is still starting. */
@@ -57,6 +61,8 @@ export function defaultTimings(env: NodeJS.ProcessEnv = process.env): Timings {
         stopMs: 30_000,
         startNoteMs: 5000,
         holderRefreshMs: 2000,
+        editorStartWindowMs: 120_000,
+        editorWarmupMs: num('DREAM_MCP_EDITOR_WARMUP_MS', 30_000),
         editorWaitMs: num('DREAM_MCP_EDITOR_WAIT_MS', 120_000),
         tickMs: 30_000,
     };

@@ -590,3 +590,74 @@ test('the expensive command-line scan only runs when the set of Unreal processes
         await t.done();
     }
 });
+
+test('an editor that has published its endpoint but does not answer yet: reads stay on our host, writes wait and then go to the editor', async () => {
+    const t = await setup({ timings: { editorWaitMs: 5000 } });
+    try {
+        await lease(await t.mgr.acquire(t.ws, t.plugin, t.action('echo'))).release();
+        const host = t.launcher.spawned[0]!;
+        const editor = await t.editor({ hang: true }); // discovery file written, main loop still busy
+        const read = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('echo')));
+        assert.equal(read.via, 'host');
+        assert.equal(read.pid, host.pid);
+        assert.match(read.notes.join(), /is starting on this project and does not answer yet/);
+        await read.release();
+        assert.equal(host.proc.exitCode, undefined, 'our host is not retired while the editor cannot answer');
+
+        setTimeout(() => (editor.opts.hang = false), 400);
+        const write = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('build')));
+        assert.equal(write.via, 'editor');
+        assert.match(write.notes.join(), /Waited [\d.]+ s for the editor \(pid \d+\) to finish starting/);
+        await write.release();
+        await waitFor(() => host.proc.exitCode !== undefined, 5000, 'our host retires once the editor answers');
+        const after = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('echo')));
+        assert.equal(after.via, 'editor');
+        await after.release();
+        assert.deepEqual(t.launcher.killed, []);
+    } finally {
+        await t.done();
+    }
+});
+
+test('no host of ours and an editor still starting: the call waits for it instead of being refused', async () => {
+    const t = await setup({ timings: { editorWarmupMs: 5000 } });
+    try {
+        const editor = await t.editor({ hang: true });
+        setTimeout(() => (editor.opts.hang = false), 400);
+        const l = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('echo')));
+        assert.equal(l.via, 'editor');
+        await l.release();
+        assert.equal(t.launcher.spawned.length, 0);
+    } finally {
+        await t.done();
+    }
+});
+
+test('an editor that started long ago and does not answer is hung: refused at once, nothing started', async () => {
+    const t = await setup({ timings: { editorWarmupMs: 5000, helloMs: 300 } });
+    try {
+        await t.editor({ hang: true, startedAt: new Date(Date.now() - 3600_000).toISOString() });
+        const t0 = Date.now();
+        const r = refusal(await t.mgr.acquire(t.ws, t.plugin, t.action('echo')));
+        assert.equal(r.reason, 'endpoint-unresponsive');
+        assert.ok(Date.now() - t0 < 2000, 'no warm-up wait for an old process');
+        assert.equal(t.launcher.spawned.length, 0);
+    } finally {
+        await t.done();
+    }
+});
+
+test('an editor that just started but never answers: refused after the warm-up wait, nothing started', async () => {
+    const t = await setup({ timings: { editorWarmupMs: 600, helloMs: 200 } });
+    try {
+        await t.editor({ hang: true });
+        const t0 = Date.now();
+        const r = refusal(await t.mgr.acquire(t.ws, t.plugin, t.action('echo')));
+        assert.equal(r.reason, 'endpoint-unresponsive');
+        assert.match(r.summary, /published its .* endpoint but has not answered for \d+ s since/);
+        assert.ok(Date.now() - t0 >= 600);
+        assert.equal(t.launcher.spawned.length, 0);
+    } finally {
+        await t.done();
+    }
+});

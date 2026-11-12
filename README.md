@@ -85,7 +85,8 @@ the project.
 | `DREAM_MCP_HOME` | Where the workspace registry, start locks and host logs live. Default `~/.dream-mcp`. |
 | `DREAM_MCP_JOB_WAIT_MS` | How long one tool call waits for a long job before handing back a job id. Default 10 min. |
 | `DREAM_MCP_START_TIMEOUT_MS` | How long to wait for a started engine to answer. Default 10 min. |
-| `DREAM_MCP_EDITOR_WAIT_MS` | How long a write waits for an editor that is opening the project to publish its endpoint. Default 2 min. |
+| `DREAM_MCP_EDITOR_WAIT_MS` | How long a write waits for an editor that is opening the project to publish its endpoint (or to answer once published). Default 2 min. |
+| `DREAM_MCP_EDITOR_WARMUP_MS` | With no host of its own, how long the server waits for an editor that has just published its endpoint to start answering. Default 30 s. |
 
 ## Workspaces
 

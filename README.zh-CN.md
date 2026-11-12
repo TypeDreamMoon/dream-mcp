@@ -79,7 +79,8 @@ claude mcp add dream -- npx -y <克隆目录的路径>
 | `DREAM_MCP_HOME` | 工程登记表、启动锁和宿主日志的位置。默认 `~/.dream-mcp`。 |
 | `DREAM_MCP_JOB_WAIT_MS` | 一次工具调用等长任务多久,超时就交回任务 id。默认 10 分钟。 |
 | `DREAM_MCP_START_TIMEOUT_MS` | 等新起的引擎应答多久。默认 10 分钟。 |
-| `DREAM_MCP_EDITOR_WAIT_MS` | 写动作等「正在打开工程的编辑器」发布端点等多久。默认 2 分钟。 |
+| `DREAM_MCP_EDITOR_WAIT_MS` | 写动作等「正在打开工程的编辑器」发布端点(或发布后开始应答)等多久。默认 2 分钟。 |
+| `DREAM_MCP_EDITOR_WARMUP_MS` | 服务端自己没有宿主时,等「刚发布端点的编辑器」开始应答等多久。默认 30 秒。 |
 
 ## 工程(workspace)
 

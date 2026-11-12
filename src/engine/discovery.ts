@@ -16,7 +16,8 @@ export function discoveryFile(projectDir: string, id: string): string {
 export type Probe =
     | { state: 'absent'; detail: string }
     | { state: 'stale'; disc: Discovery; detail: string }
-    | { state: 'unresponsive'; disc: Discovery; detail: string }
+    /** `answered`: hello replied, but with the wrong protocol or id (so it is not merely slow). */
+    | { state: 'unresponsive'; disc: Discovery; detail: string; answered: boolean }
     | { state: 'alive'; disc: Discovery; hello: Hello; endpoint: Endpoint; detail: string };
 
 export function endpointOf(disc: Discovery, hello?: Hello): Endpoint {
@@ -48,8 +49,8 @@ export async function probe(projectDir: string, id: string, launcher: ProcessLau
     try {
         const hello = await client.hello();
         if (hello.protocol !== PROTOCOL)
-            return { state: 'unresponsive', disc, detail: `pid ${disc.pid} speaks protocol ${hello.protocol}, this server speaks ${PROTOCOL}; update the plugin or dream-mcp` };
-        if (hello.id && hello.id !== id) return { state: 'unresponsive', disc, detail: `port ${disc.port} answers as "${hello.id}", not "${id}"` };
+            return { state: 'unresponsive', disc, answered: true, detail: `pid ${disc.pid} speaks protocol ${hello.protocol}, this server speaks ${PROTOCOL}; update the plugin or dream-mcp` };
+        if (hello.id && hello.id !== id) return { state: 'unresponsive', disc, answered: true, detail: `port ${disc.port} answers as "${hello.id}", not "${id}"` };
         return { state: 'alive', disc, hello, endpoint: endpointOf(disc, hello), detail: `${disc.mode} pid ${disc.pid} on port ${disc.port}${hello.busy ? ' (busy)' : ''}` };
     } catch (error) {
         const e = error as EndpointError;
@@ -58,6 +59,7 @@ export async function probe(projectDir: string, id: string, launcher: ProcessLau
             const image = await launcher.imageName(disc.pid);
             if (image !== undefined && !isUnrealImage(image)) return { state: 'stale', disc, detail: `pid ${disc.pid} is now ${image}, not an Unreal process` };
         }
-        return { state: 'unresponsive', disc, detail: `pid ${disc.pid} is running but ${e.message}` };
+        const answered = e.kind !== 'timeout' && e.kind !== 'unreachable';
+        return { state: 'unresponsive', disc, answered, detail: `pid ${disc.pid} is running but ${e.message}` };
     }
 }

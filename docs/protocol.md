@@ -237,6 +237,14 @@ It refuses instead of starting a second process when the project may still be he
   `DREAM_MCP_EDITOR_WAIT_MS` they are refused (`editor-without-endpoint`). Read-only actions
   are not held up and may start a host.
 
+An editor publishes its discovery file a few seconds before it can answer `hello`. An editor
+endpoint that does not answer yet, whose `startedAt` is less than two minutes old, is treated
+as **starting**, not hung: read-only calls keep using a host this server already runs, and
+other calls wait for the editor to answer (up to `DREAM_MCP_EDITOR_WAIT_MS` with a host to
+fall back on, `DREAM_MCP_EDITOR_WARMUP_MS`, default 30 s, without) and then go to it; only
+then does the server's own host retire. An endpoint that answers with the wrong protocol or
+id, or an editor that started long ago and does not answer, is refused at once as before.
+
 The check for "another Unreal process has the project open" runs before every write in a
 process the server owns: a cheap process list, refreshed in the background every two seconds
 while a host runs, and a command-line scan only when that list changes.

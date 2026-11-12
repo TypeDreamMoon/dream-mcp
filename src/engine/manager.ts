@@ -248,6 +248,29 @@ export class EngineManager {
 
             if (p.state === 'unresponsive') {
                 if (own && own.pid === p.disc.pid && !own.readyAt) continue;
+                // An editor that published its discovery file a moment ago may not answer
+                // `hello` for a few more seconds. Treat it as starting, not hung: reads keep
+                // using our own host meanwhile, everything else waits for the editor.
+                if (p.disc.mode === 'editor' && !p.answered && this.recentlyStarted(p.disc)) {
+                    if (own && !action.writes && !(needRender && own.mode !== 'render')) {
+                        const ep = await this.helloOn(own, plugin);
+                        if (ep)
+                            return {
+                                lease: this.lease(ep, own.temporary ? 'temp-render' : 'host', own, [
+                                    `An editor (pid ${p.disc.pid}) is starting on this project and does not answer yet; this call was served by the engine host meanwhile.`,
+                                ]),
+                            };
+                    }
+                    const waited = await this.waitForEditor(ws, plugin, p.disc.pid, own ? this.timings.editorWaitMs : this.timings.editorWarmupMs, onProgress);
+                    if (waited === 'retry') continue;
+                    if (waited) return waited;
+                    return refuse(
+                        'endpoint-unresponsive',
+                        `The editor (pid ${p.disc.pid}) published its ${plugin.name} endpoint but has not answered for ${Math.round((own ? this.timings.editorWaitMs : this.timings.editorWarmupMs) / 1000)} s since. dream-mcp will not start a second engine on a project that is open.`,
+                        ['If the editor is still loading or busy (compiling, a modal dialog), wait and retry.', 'If it is hung, close it and retry.'],
+                        { pid: p.disc.pid, mode: p.disc.mode },
+                    );
+                }
                 return refuse(
                     'endpoint-unresponsive',
                     `A process holds this project but its ${plugin.name} endpoint does not answer: ${p.detail}. dream-mcp will not start a second engine on a project that is still open.`,
@@ -442,6 +465,38 @@ export class EngineManager {
             if (this.now() >= end) return false;
             await sleep(100);
         }
+    }
+
+    /** Did this endpoint come up recently enough that "not answering" probably means "still starting"? */
+    private recentlyStarted(disc: { startedAt?: string }): boolean {
+        const at = disc.startedAt ? Date.parse(disc.startedAt) : NaN;
+        return Number.isFinite(at) && Date.now() - at < this.timings.editorStartWindowMs;
+    }
+
+    /**
+     * Wait for an editor whose discovery file exists to answer `hello`. Returns a lease on it
+     * (our own host retires), 'retry' when the picture changed (the file went away or now
+     * names another process), or undefined after `ms`.
+     */
+    private async waitForEditor(ws: Workspace, plugin: FoundPlugin, pid: number, ms: number, onProgress?: StartProgress): Promise<Acquired | 'retry' | undefined> {
+        const t0 = this.now();
+        let lastNote = t0;
+        while (this.now() - t0 < ms) {
+            const p = await this.probe(ws, plugin.manifest!.id);
+            if (p.state === 'alive' && p.disc.mode === 'editor') {
+                const own = this.hosts.get(EngineManager.key(ws));
+                if (own) this.retireWhenIdle(own, 'the editor opened this project');
+                const secs = ((this.now() - t0) / 1000).toFixed(1);
+                return { lease: this.lease(p.endpoint, 'editor', undefined, [`Waited ${secs} s for the editor (pid ${p.disc.pid}) to finish starting, then handed the call to it.`]) };
+            }
+            if (p.state === 'absent' || p.state === 'stale' || p.disc.pid !== pid) return 'retry';
+            if (onProgress && this.now() - lastNote >= this.timings.startNoteMs) {
+                lastNote = this.now();
+                onProgress(`Waiting for the editor (pid ${pid}) to finish starting: ${Math.round((lastNote - t0) / 1000)} s so far.`, lastNote - t0);
+            }
+            await sleep(250);
+        }
+        return undefined;
     }
 
     /** Wait until a host that is stopping, retiring or temporary is gone. */

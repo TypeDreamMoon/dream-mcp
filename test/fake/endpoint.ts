@@ -54,6 +54,8 @@ export interface FakeEngineOptions {
     protocol?: number;
     /** `hello` never answers (a hung editor). */
     hang?: boolean;
+    /** `startedAt` written to discovery files (default: now). */
+    startedAt?: string;
     writeDiscovery?: boolean;
     onShutdown?: () => void;
 }
@@ -162,7 +164,7 @@ export class FakeEngine {
                 render: this.opts.render,
                 engine: '5.8.0',
                 plugin: '1.0.0',
-                startedAt: new Date().toISOString(),
+                startedAt: this.opts.startedAt ?? new Date().toISOString(),
             };
             await fs.writeFile(this.discoveryPath(manifest.id), JSON.stringify(body));
         }
