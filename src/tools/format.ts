@@ -9,6 +9,7 @@ const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 /**
  * How much of a result's `data` object the text repeats (it is always complete in the
  * structured content):
+ * - a result with a `text` block does not repeat `data` at all;
  * - a result that is only an answer (no diagnostics, writes or artifacts, as from a lookup)
  *   repeats `data` in full up to DATA_ANSWER_LIMIT characters;
  * - any other result repeats it in full up to DATA_FULL_LIMIT characters, and otherwise
@@ -61,6 +62,9 @@ function summarize(data: Record<string, unknown>): string {
 
 export function dataText(result: ResultBody): string | undefined {
     if (!Object.keys(result.data).length) return undefined;
+    // A result that brings its own text for the model does not need its data repeated as
+    // well; data stays complete in the structured content.
+    if (result.text) return undefined;
     const json = JSON.stringify(result.data);
     const answer = !result.diagnostics.length && !result.writes.length && !result.artifacts.length;
     if (json.length <= (answer ? DATA_ANSWER_LIMIT : DATA_FULL_LIMIT)) return `data: ${json}`;

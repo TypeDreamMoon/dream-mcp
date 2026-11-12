@@ -68,12 +68,17 @@ test('a text block over the limit is cut at a line end, with a note saying how m
     assert.equal(textBlock('short\n  tree\n'), 'short\n  tree');
 });
 
-test('text does not change how data is shortened', () => {
+test('a result with a text block does not repeat data in the text; data stays in the structured content', async () => {
     const data = { entries: Array.from({ length: 150 }, (_, i) => ({ name: `UE.Node${i}`, output: 'float' })) };
     const withText = makeResult('ok', '150 matches.', { data, text: 'a\n  b' });
-    assert.equal(dataText(withText), `data: ${JSON.stringify(data)}`, 'still an answer: data in full');
+    assert.equal(dataText(withText), undefined);
+    const out = await renderResult(withText);
+    assert.equal(out.content.length, 1, 'only the text block, no data line');
+    assert.deepEqual((out.structuredContent as { data: unknown }).data, data);
     const withDiag = makeResult('ok', 'Layout.', { data, text: 'a\n  b', diagnostics: [{ message: 'w', severity: 'warning' }] });
-    assert.match(dataText(withDiag)!, /^data \(summary of/);
+    assert.equal(dataText(withDiag), undefined);
+    // Without text the earlier rules apply.
+    assert.equal(dataText(makeResult('ok', '150 matches.', { data })), `data: ${JSON.stringify(data)}`);
 });
 
 test('the shape check wants a one-line summary and a string text', () => {
