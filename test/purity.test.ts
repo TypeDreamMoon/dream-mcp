@@ -44,6 +44,7 @@ test('the fake endpoint itself follows the wire shapes the contract tests demand
         assert.deepEqual(helloProblems(hello.body, 'demo'), []);
         for (const [action, args] of [
             ['echo', { text: 'x' }],
+            ['echo', { text: 'x', tree: 3 }],
             ['fail', { file: 'Demo/a.dmo' }],
             ['nope', {}],
             ['echo', {}],

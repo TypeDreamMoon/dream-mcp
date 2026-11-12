@@ -22,7 +22,10 @@
       "long": false,
       "args": {
         "type": "object",
-        "properties": { "text": { "type": "string", "description": "Text to echo." } },
+        "properties": {
+          "text": { "type": "string", "description": "Text to echo." },
+          "tree": { "type": "integer", "description": "Also return an indented tree of this many lines as the result's text block." }
+        },
         "required": ["text"]
       }
     },

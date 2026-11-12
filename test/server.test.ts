@@ -461,3 +461,20 @@ test('text output through the tools: artifact path once, an answer\'s data in fu
         await p.cleanup();
     }
 });
+
+test('a result text block reaches the model verbatim and stays in the structured content', async () => {
+    const p = await makeProject({ fixtures: ['DemoPlugin'] });
+    const editor = await openEditor(p);
+    const c = await connect(p);
+    try {
+        const r = await c.call('dream_demo', 'echo', { text: 'tree', tree: 6 });
+        const first = r.content[0]!.text!.split('\n');
+        assert.equal(first[0], 'echo: tree');
+        assert.deepEqual(first.slice(1, 7), ['Panel_0 at (0, 0) size 200x40', '  Text_1 at (10, 2) size 200x40', '    Text_2 at (20, 4) size 200x40', 'Panel_3 at (30, 6) size 200x40', '  Text_4 at (40, 8) size 200x40', '    Text_5 at (50, 10) size 200x40']);
+        assert.match(String(r.structuredContent!.text), /^Panel_0 at \(0, 0\)/);
+    } finally {
+        await c.done();
+        await editor.stop();
+        await p.cleanup();
+    }
+});

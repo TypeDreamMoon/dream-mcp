@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { makeResult } from '../src/protocol/types.js';
-import { DATA_ANSWER_LIMIT, DATA_FULL_LIMIT, DATA_SUMMARY_LIMIT, dataText, renderResult } from '../src/tools/format.js';
+import { DATA_ANSWER_LIMIT, DATA_FULL_LIMIT, DATA_SUMMARY_LIMIT, dataText, renderResult, TEXT_LIMIT, textBlock } from '../src/tools/format.js';
+import { resultProblems } from './shape.js';
 
 const text = async (r: ReturnType<typeof makeResult>) => (await renderResult(r)).content.filter(c => c.type === 'text').map(c => (c as { text: string }).text);
 
@@ -37,4 +38,46 @@ test('data that is the answer (lookup-style) is kept in full up to the answer li
     const huge = makeResult('ok', 'many', { data: { text: 'z'.repeat(DATA_ANSWER_LIMIT + 500) } });
     assert.match(dataText(huge)!, new RegExp(`^data \\(first ${DATA_ANSWER_LIMIT} of \\d+ characters; the complete object is the "data" field`));
     assert.equal(dataText(makeResult('ok', 'nothing')), undefined);
+});
+
+test('a text block goes verbatim after the summary and before diagnostics', async () => {
+    const tree = 'Root at (0, 0) size 800x600\n  Panel at (10, 10) size 200x40\n    Label at (14, 12) size 80x16';
+    const r = makeResult('source-error', 'Layout of W_Menu: 3 widgets, 1 warning.', {
+        text: tree + '\n\n',
+        diagnostics: [{ severity: 'warning', message: 'Label overflows its panel.', file: 'UI/W_Menu.dui', line: 4 }],
+    });
+    const first = (await text(r))[0]!;
+    const lines = first.split('\n');
+    assert.equal(lines[0], '[source-error] Layout of W_Menu: 3 widgets, 1 warning.');
+    assert.deepEqual(lines.slice(1, 4), tree.split('\n'), 'indentation and line breaks kept');
+    assert.equal(lines[4], 'Diagnostics (1):');
+    const out = await renderResult(r);
+    assert.equal((out.structuredContent as { text: string }).text, tree + '\n\n', 'structured content carries text unchanged');
+});
+
+test('a text block over the limit is cut at a line end, with a note saying how much', () => {
+    const lineText = (i: number) => `${'  '.repeat(i % 4)}Node_${i} at (${i}, ${i}) size 100x20`;
+    const all = Array.from({ length: 2000 }, (_, i) => lineText(i)).join('\n');
+    assert.ok(all.length > TEXT_LIMIT);
+    const shown = textBlock(all);
+    const body = shown.split('\n');
+    const note = body.pop()!;
+    assert.match(note, /^\[text cut: showed (\d+) of 2000 lines \(\d+ of \d+ characters\)\. The full text is the "text" field of the structured content; Next says how to ask for less\.\]$/);
+    assert.ok(body.join('\n').length <= TEXT_LIMIT);
+    body.forEach((l, i) => assert.equal(l, lineText(i), `line ${i} intact`));
+    assert.equal(textBlock('short\n  tree\n'), 'short\n  tree');
+});
+
+test('text does not change how data is shortened', () => {
+    const data = { entries: Array.from({ length: 150 }, (_, i) => ({ name: `UE.Node${i}`, output: 'float' })) };
+    const withText = makeResult('ok', '150 matches.', { data, text: 'a\n  b' });
+    assert.equal(dataText(withText), `data: ${JSON.stringify(data)}`, 'still an answer: data in full');
+    const withDiag = makeResult('ok', 'Layout.', { data, text: 'a\n  b', diagnostics: [{ message: 'w', severity: 'warning' }] });
+    assert.match(dataText(withDiag)!, /^data \(summary of/);
+});
+
+test('the shape check wants a one-line summary and a string text', () => {
+    assert.deepEqual(resultProblems({ ...makeResult('ok', 'one line'), text: 'a\nb' }), []);
+    assert.ok(resultProblems({ ...makeResult('ok', 'x'), summary: 'two\nlines' }).some(p => /summary must be one line/.test(p)));
+    assert.ok(resultProblems({ ...makeResult('ok', 'x'), text: 42 }).some(p => /text, when present, must be a string/.test(p)));
 });
