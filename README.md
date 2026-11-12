@@ -21,22 +21,31 @@ No server update is needed.
 
 ## Install and run
 
-dream-mcp is not on npm yet. Run it from a clone or from git:
-
-```bash
-git clone https://github.com/TypeDreamMoon/dream-mcp
-cd dream-mcp
-npm install      # also builds dist/
-npx .            # starts the server on stdio (it waits for an MCP client)
-```
-
-or, without a clone:
+Straight from GitHub (needs Node 20+ and `git` on the PATH):
 
 ```bash
 npx -y github:TypeDreamMoon/dream-mcp
 ```
 
-`npx <path to the clone>` works from anywhere.
+npx clones the repository, installs its dependencies and builds it (the `prepare` script
+compiles the TypeScript), then starts the server on stdio, where it waits for an MCP
+client. The first start takes a while (about 20 s for a first install); later starts use npx's cache. Add
+`#<branch or tag>` to pin a version, for example `github:TypeDreamMoon/dream-mcp#v2`.
+
+After dream-mcp is published to npm (not yet), this will also work:
+
+```bash
+npx -y dream-mcp
+```
+
+From a clone, for development:
+
+```bash
+git clone https://github.com/TypeDreamMoon/dream-mcp
+cd dream-mcp
+npm install      # also builds dist/
+npx .            # or, from anywhere: npx -y <path to the clone>
+```
 
 From a packed tarball (`npm pack`), name the package explicitly:
 
@@ -53,7 +62,7 @@ times out.
 From the Unreal project folder:
 
 ```bash
-claude mcp add dream -- npx -y <path to the clone>
+claude mcp add dream -- npx -y github:TypeDreamMoon/dream-mcp
 ```
 
 or in the project's `.mcp.json`:
@@ -63,7 +72,7 @@ or in the project's `.mcp.json`:
   "mcpServers": {
     "dream": {
       "command": "npx",
-      "args": ["-y", "<path to the clone>"],
+      "args": ["-y", "github:TypeDreamMoon/dream-mcp"],
       "env": { "DREAM_MCP_PROJECT": "<path to>/MyGame.uproject" }
     }
   }
@@ -75,8 +84,8 @@ folder. On Windows some clients need `"command": "cmd", "args": ["/c", "npx", "-
 
 ### Other MCP clients
 
-Any client that can start a stdio server works. The command is `npx -y <path or git URL>`
-(or `node <clone>/dist/cli.js`); pass `--project <path>` or set `DREAM_MCP_PROJECT` to pick
+Any client that can start a stdio server works. The command is `npx -y github:TypeDreamMoon/dream-mcp`
+(or a path to a clone, or `node <clone>/dist/cli.js`); pass `--project <path>` or set `DREAM_MCP_PROJECT` to pick
 the project.
 
 | Variable | Meaning |

@@ -252,7 +252,9 @@ It refuses instead of starting a second process when the project may still be he
     `DREAM_MCP_EDITOR_WAIT_MS`, default 2 minutes, with progress notifications) and hands the
     call to it. Writes that would run in a host the server already has wait the same way;
     reads on that host carry on. If no endpoint appears in time, writes are refused
-    (`editor-without-endpoint`) and reads may start a host.
+    (`editor-without-endpoint`) and reads may start a host. That verdict is kept for the rest of
+    the process's 5-minute window (or until it publishes a discovery file): later calls do not
+    wait for it again.
   - **5 minutes or more ago**: an editor without this plugin's endpoint (switched off, an
     older plugin). No waiting: writes are refused, reads may start a host.
 

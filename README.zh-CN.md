@@ -17,22 +17,30 @@ dream-mcp 读清单生成工具。装上带清单的插件,工具就出现,服�
 
 ## 安装与运行
 
-还没发布到 npm,从克隆或 git 地址运行:
-
-```bash
-git clone https://github.com/TypeDreamMoon/dream-mcp
-cd dream-mcp
-npm install      # 同时构建 dist/
-npx .            # 在 stdio 上启动服务(等待 MCP 客户端连接)
-```
-
-不克隆也可以:
+直接从 GitHub 运行(需要 Node 20+,且 `git` 在 PATH 里):
 
 ```bash
 npx -y github:TypeDreamMoon/dream-mcp
 ```
 
-在任何目录下都可以 `npx <克隆目录的路径>`。
+npx 会克隆仓库、装依赖并构建(`prepare` 脚本编译 TypeScript),然后在 stdio 上启动服务,等待 MCP 客户端连接。
+第一次启动要一会儿(本机约 20 秒),之后用 npx 的缓存。要固定版本就加 `#<分支或标签>`,例如
+`github:TypeDreamMoon/dream-mcp#v2`。
+
+发布到 npm 之后(现在还没有)也可以这样:
+
+```bash
+npx -y dream-mcp
+```
+
+从克隆运行(开发用):
+
+```bash
+git clone https://github.com/TypeDreamMoon/dream-mcp
+cd dream-mcp
+npm install      # 同时构建 dist/
+npx .            # 或者在任何目录下:npx -y <克隆目录的路径>
+```
 
 用 `npm pack` 打出的压缩包运行时,要显式写包名:
 
@@ -48,7 +56,7 @@ MCP 客户端随后超时。
 在 Unreal 工程目录下:
 
 ```bash
-claude mcp add dream -- npx -y <克隆目录的路径>
+claude mcp add dream -- npx -y github:TypeDreamMoon/dream-mcp
 ```
 
 或者写进工程的 `.mcp.json`:
@@ -58,7 +66,7 @@ claude mcp add dream -- npx -y <克隆目录的路径>
   "mcpServers": {
     "dream": {
       "command": "npx",
-      "args": ["-y", "<克隆目录的路径>"],
+      "args": ["-y", "github:TypeDreamMoon/dream-mcp"],
       "env": { "DREAM_MCP_PROJECT": "<路径>/MyGame.uproject" }
     }
   }
@@ -70,7 +78,7 @@ claude mcp add dream -- npx -y <克隆目录的路径>
 
 ### 其他 MCP 客户端
 
-能启动 stdio 服务的客户端都行。命令是 `npx -y <路径或 git 地址>`(或 `node <克隆目录>/dist/cli.js`);
+能启动 stdio 服务的客户端都行。命令是 `npx -y github:TypeDreamMoon/dream-mcp`(或克隆目录的路径,或 `node <克隆目录>/dist/cli.js`);
 用 `--project <路径>` 或 `DREAM_MCP_PROJECT` 选工程。
 
 | 环境变量 | 含义 |
