@@ -661,3 +661,86 @@ test('an editor that just started but never answers: refused after the warm-up w
         await t.done();
     }
 });
+
+test('an editor still starting (process up, no discovery file yet): a read waits for it instead of starting a second engine', async () => {
+    const t = await setup({ timings: { editorWaitMs: 5000 } });
+    const editorProc = dummyProcess();
+    try {
+        t.launcher.projectProcs = [{ pid: editorProc.pid, name: 'UnrealEditor.exe', startedAt: Date.now() - 2000 }];
+        setTimeout(() => void t.editor({ pid: editorProc.pid }), 400);
+        const seen: string[] = [];
+        const l = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('echo'), m => seen.push(m)));
+        assert.equal(l.via, 'editor');
+        assert.equal(l.pid, editorProc.pid);
+        assert.match(l.notes.join(), /was opening this project; waited [\d.]+ s for its endpoint/);
+        assert.equal(t.launcher.spawned.length, 0, 'no engine of ours next to the starting editor');
+        await l.release();
+        const w = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('build')));
+        assert.equal(w.via, 'editor');
+        await w.release();
+        assert.equal(t.launcher.spawned.length, 0);
+    } finally {
+        editorProc.kill();
+        await t.done();
+    }
+});
+
+test('a starting editor that never publishes an endpoint: after the wait a read starts a host and a write is refused', async () => {
+    const t = await setup({ timings: { editorWaitMs: 500 } });
+    const editorProc = dummyProcess();
+    try {
+        t.launcher.projectProcs = [{ pid: editorProc.pid, name: 'UnrealEditor.exe', startedAt: Date.now() - 1000 }];
+        const t0 = Date.now();
+        const read = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('echo')));
+        assert.ok(Date.now() - t0 >= 500, 'waited first');
+        assert.equal(read.via, 'host');
+        await read.release();
+        const w = refusal(await t.mgr.acquire(t.ws, t.plugin, t.action('poke')));
+        assert.equal(w.reason, 'editor-without-endpoint');
+        assert.match(w.summary, /did not appear within/);
+    } finally {
+        editorProc.kill();
+        await t.done();
+    }
+});
+
+test('a process that has had the project open for long without an endpoint: no waiting; reads start a host, writes are refused', async () => {
+    const t = await setup({ timings: { editorWaitMs: 5000 } });
+    const editorProc = dummyProcess();
+    try {
+        t.launcher.projectProcs = [{ pid: editorProc.pid, name: 'UnrealEditor.exe', startedAt: Date.now() - 3600_000 }];
+        const t0 = Date.now();
+        const read = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('echo')));
+        assert.equal(read.via, 'host');
+        assert.ok(Date.now() - t0 < 4000, 'did not wait out editorWaitMs');
+        await read.release();
+        const t1 = Date.now();
+        const w = refusal(await t.mgr.acquire(t.ws, t.plugin, t.action('poke')));
+        assert.ok(Date.now() - t1 < 2000, 'refused without waiting');
+        assert.equal(w.reason, 'editor-without-endpoint');
+        assert.match(w.summary, /has had this project open for 60 min without a DreamMCP endpoint/);
+    } finally {
+        editorProc.kill();
+        await t.done();
+    }
+});
+
+test('our host already running and an editor starting: reads stay on our host without waiting', async () => {
+    const t = await setup({ timings: { editorWaitMs: 5000 } });
+    const editorProc = dummyProcess();
+    try {
+        await lease(await t.mgr.acquire(t.ws, t.plugin, t.action('echo'))).release();
+        const host = t.launcher.spawned[0]!;
+        t.launcher.projectProcs = [{ pid: editorProc.pid, name: 'UnrealEditor.exe', startedAt: Date.now() }];
+        await new Promise(r => setTimeout(r, 250));
+        const t0 = Date.now();
+        const read = lease(await t.mgr.acquire(t.ws, t.plugin, t.action('echo')));
+        assert.equal(read.pid, host.pid);
+        assert.ok(Date.now() - t0 < 1500, 'reads do not wait');
+        await read.release();
+        assert.equal(t.launcher.spawned.length, 1);
+    } finally {
+        editorProc.kill();
+        await t.done();
+    }
+});

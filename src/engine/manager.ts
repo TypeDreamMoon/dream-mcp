@@ -229,7 +229,7 @@ export class EngineManager {
                 }
                 if (own && own.pid === p.disc.pid) {
                     if (needRender && own.mode !== 'render') return this.tempRender(ws, plugin, action, onProgress);
-                    const guard = await this.guardWrites(ws, plugin, action, onProgress);
+                    const guard = await this.guardOthers(ws, plugin, action, onProgress, false);
                     if (guard) return guard;
                     return { lease: this.lease(p.endpoint, own.temporary ? 'temp-render' : 'host', own, []) };
                 }
@@ -284,7 +284,7 @@ export class EngineManager {
                 const direct = await this.helloOn(own, plugin);
                 if (direct) {
                     if (needRender && own.mode !== 'render') return this.tempRender(ws, plugin, action, onProgress);
-                    const guard = await this.guardWrites(ws, plugin, action, onProgress);
+                    const guard = await this.guardOthers(ws, plugin, action, onProgress, false);
                     if (guard) return guard;
                     return { lease: this.lease(direct, own.temporary ? 'temp-render' : 'host', own, []) };
                 }
@@ -304,7 +304,7 @@ export class EngineManager {
             if (blocker) return { refusal: blocker };
 
             if (needRender && effectiveMode(ws) === 'headless') return this.tempRender(ws, plugin, action, onProgress);
-            const guard = await this.guardWrites(ws, plugin, action, onProgress);
+            const guard = await this.guardOthers(ws, plugin, action, onProgress, true);
             if (guard) return guard;
             const started = await this.ensureHost(ws, needRender ? 'render' : ws.config.engine.mode, false, onProgress);
             if ('refusal' in started) {
@@ -342,32 +342,43 @@ export class EngineManager {
         const hung = others.find(o => o.state === 'unresponsive');
         if (hung && action.writes)
             return refused('endpoint-unresponsive', `A process holds this project but does not answer: ${hung.detail}.`, ['Wait for it, or close it, then retry.']);
-        // Unreal processes without any endpoint are handled by guardWrites.
+        // Unreal processes without any endpoint are handled by guardOthers.
         return undefined;
     }
 
     /**
-     * Before a write runs in a process this server owns (or is about to start): is some other
-     * Unreal process opening this project? An editor takes several seconds to publish its
-     * endpoint after it starts, and writing from our host in that window would put two
-     * processes on the same packages. If one is found, wait for its endpoint and hand the
-     * call to it; give up with a refusal after `editorWaitMs`. Read-only actions pass.
+     * Is some other Unreal process opening this project? Asked before a write runs in a
+     * process this server owns, and before this server starts any engine process (`starting`).
+     *
+     * An editor takes a while after it starts to publish its endpoint, and an engine of ours
+     * running in that window would put two processes on the same packages (for a start: a
+     * second full editor next to the user's). So for a process that started less than
+     * `editorLaunchWindowMs` ago (or whose start time is unknown), wait for its endpoint and
+     * hand the call to it. If none appears within `editorWaitMs`, or the process has had the
+     * project open for longer than the window: writes are refused, reads go ahead.
      */
-    private async guardWrites(ws: Workspace, plugin: FoundPlugin, action: ActionSpec, onProgress?: StartProgress): Promise<Acquired | undefined> {
-        if (!action.writes) return undefined;
+    private async guardOthers(ws: Workspace, plugin: FoundPlugin, action: ActionSpec, onProgress: StartProgress | undefined, starting: boolean): Promise<Acquired | undefined> {
+        if (!action.writes && !starting) return undefined;
         const holders = await this.foreignHolders(ws);
         if (!holders.length) return undefined;
-        const h = holders[0]!;
+        const young = holders.filter(h => h.startedAt === undefined || Date.now() - h.startedAt < this.timings.editorLaunchWindowMs);
+        const h = young[0] ?? holders[0]!;
+        const refuseWrite = (summary: string, next: string[]) => (action.writes ? refuse('editor-without-endpoint', summary, next, { pid: h.pid }) : undefined);
         // An editor that already serves other plugins of this project, but not this one, is
         // not going to publish this endpoint by waiting.
         const others = [...(await this.probeAll(ws)).entries()].filter(([k]) => k !== plugin.manifest!.id).map(([, v]) => v);
         if (others.some(o => o.state === 'alive' && o.disc.mode === 'editor' && o.disc.pid === h.pid))
-            return refuse(
-                'editor-without-endpoint',
-                `The editor (pid ${h.pid}) has this project open but ${plugin.name}'s endpoint is not running in it. Writing from a second process would overwrite the editor's work.`,
-                ['Enable the plugin and its DreamMCP endpoint in the editor (or update the plugin), then retry.', 'Read-only actions still work.'],
-                { pid: h.pid },
-            );
+            return refuseWrite(`The editor (pid ${h.pid}) has this project open but ${plugin.name}'s endpoint is not running in it. Writing from a second process would overwrite the editor's work.`, [
+                'Enable the plugin and its DreamMCP endpoint in the editor (or update the plugin), then retry.',
+                'Read-only actions still work.',
+            ]);
+        if (!young.length) {
+            const mins = h.startedAt ? Math.round((Date.now() - h.startedAt) / 60_000) : undefined;
+            return refuseWrite(`${h.name} (pid ${h.pid}) has had this project open${mins !== undefined ? ` for ${mins} min` : ''} without a DreamMCP endpoint. Writing from another engine process could overwrite its work.`, [
+                'Close it, or enable the DreamMCP endpoint in it (update the plugin), then retry.',
+                'Read-only actions still work.',
+            ]);
+        }
         const t0 = this.now();
         const deadline = t0 + this.timings.editorWaitMs;
         let lastNote = t0;
@@ -389,14 +400,12 @@ export class EngineManager {
             }
             await sleep(250);
         }
-        return refuse(
-            'editor-without-endpoint',
+        return refuseWrite(
             `${h.name} (pid ${h.pid}) has this project open, or is still opening it, and its DreamMCP endpoint did not appear within ${Math.round(this.timings.editorWaitMs / 1000)} s. Writing from another engine process now could overwrite what that editor loads or saves.`,
             [
                 'If the editor is still loading, wait until it has finished, then retry: it will serve the call.',
                 'If that editor has no DreamMCP endpoint (switched off, or an older plugin), close it or enable the endpoint. Read-only actions still work.',
             ],
-            { pid: h.pid },
         );
     }
 
@@ -566,7 +575,7 @@ export class EngineManager {
         let lock = this.renderLocks.get(key);
         if (!lock) this.renderLocks.set(key, (lock = new Mutex()));
         return lock.run(async () => {
-            const guard = await this.guardWrites(ws, plugin, action, onProgress);
+            const guard = await this.guardOthers(ws, plugin, action, onProgress, true);
             if (guard) return guard;
             const own = this.hosts.get(key);
             if (own && own.mode === 'render' && this.isRunning(own) && !own.stopping && !own.retire) {

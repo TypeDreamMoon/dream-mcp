@@ -245,12 +245,18 @@ It refuses instead of starting a second process when the project may still be he
 - discovery file present, pid alive, `hello` not answering (or another protocol):
   `refused`, reason `endpoint-unresponsive`;
 - an editor (or any Unreal process) has the project open without an endpoint for this
-  plugin: write actions wait for its endpoint to appear (an editor publishes it some seconds
-  after it starts) and then go to the editor; if it does not appear within
-  `DREAM_MCP_EDITOR_WAIT_MS` they are refused (`editor-without-endpoint`). Read-only actions
-  are not held up and may start a host.
+  plugin. What happens depends on how long ago that process started:
+  - **less than 5 minutes ago** (or its start time is unknown): it is taken to be an editor
+    that is still opening. Before starting any engine process of its own, for reads and
+    writes alike, the server waits for that editor's endpoint (up to
+    `DREAM_MCP_EDITOR_WAIT_MS`, default 2 minutes, with progress notifications) and hands the
+    call to it. Writes that would run in a host the server already has wait the same way;
+    reads on that host carry on. If no endpoint appears in time, writes are refused
+    (`editor-without-endpoint`) and reads may start a host.
+  - **5 minutes or more ago**: an editor without this plugin's endpoint (switched off, an
+    older plugin). No waiting: writes are refused, reads may start a host.
 
-An editor publishes its discovery file a few seconds before it can answer `hello`. An editor
+Some endpoints (older plugin builds) publish the discovery file a few seconds before they can answer `hello`. An editor
 endpoint that does not answer yet, whose `startedAt` is less than two minutes old, is treated
 as **starting**, not hung: read-only calls keep using a host this server already runs, and
 other calls wait for the editor to answer (up to `DREAM_MCP_EDITOR_WAIT_MS` with a host to
@@ -280,7 +286,12 @@ non-rendering call starts the headless host again.
   recognised as stale on the next run (its pid is gone) and replaced. Endpoints should keep
   writes short and atomic where they can.
 - The window between an editor process starting and its endpoint appearing is covered for
-  writes from hosts dream-mcp owns (above), not for other tools that write assets.
+  engines dream-mcp starts and for writes from hosts it owns (above), not for other tools
+  that write assets.
+- Detecting that another Unreal process has the project open lags by one to two seconds:
+  the process list is refreshed every two seconds while a host of dream-mcp's runs, and a
+  write reads the last refresh. A write can therefore still run in dream-mcp's host during
+  the first second or two of a user's editor starting, before that editor loads packages.
 
 ## 5. Refusal reasons the server itself produces
 

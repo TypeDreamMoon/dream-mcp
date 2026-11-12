@@ -167,10 +167,13 @@ content.
   second process writing the same assets. Read-only actions may still run in a host.
 - Actions that write assets run one at a time per project.
 - dream-mcp only ever stops processes it started itself, by the process id it recorded.
-- Before a write runs in its own host, dream-mcp checks whether another Unreal process is
-  opening the project (an editor takes several seconds to publish its endpoint). If so, the
-  write waits for that endpoint and goes to the editor; if none appears within
-  `DREAM_MCP_EDITOR_WAIT_MS` (default 2 min) the write is refused with the reason.
+- Before it starts an engine of its own (for any call), and before a write runs in its own
+  host, dream-mcp checks whether another Unreal process has the project open. One that
+  started in the last 5 minutes is taken to be an editor still opening: the call waits for
+  its endpoint (up to `DREAM_MCP_EDITOR_WAIT_MS`, default 2 min) and goes to the editor, so an
+  editor that is opening does not make dream-mcp start a second engine. If no endpoint appears, or
+  the process has been open for longer, writes are refused with the reason and reads may
+  start a host. Reads on a host dream-mcp already runs are not held up.
 
 ## Known limitations
 

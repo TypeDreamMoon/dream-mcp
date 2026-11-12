@@ -19,6 +19,8 @@ export interface SpawnOptions {
 export interface ProjectProcess {
     pid: number;
     name: string;
+    /** When the process started (ms since the epoch), if the platform tells. */
+    startedAt?: number;
 }
 
 /**
@@ -129,26 +131,31 @@ export const nodeLauncher: ProcessLauncher = {
     async projectProcesses(uproject) {
         if (process.platform === 'win32') {
             const script =
-                "Get-CimInstance Win32_Process -Filter \"Name LIKE 'UnrealEditor%' OR Name LIKE 'UE4Editor%' OR Name LIKE 'UE5Editor%'\" | Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress";
+                "Get-CimInstance Win32_Process -Filter \"Name LIKE 'UnrealEditor%' OR Name LIKE 'UE4Editor%' OR Name LIKE 'UE5Editor%'\" | " +
+                "Select-Object ProcessId,Name,CommandLine,@{n='Started';e={ if ($_.CreationDate) { [DateTimeOffset]::new($_.CreationDate).ToUnixTimeMilliseconds() } else { $null } }} | ConvertTo-Json -Compress";
             const out = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script]);
             if (out === undefined) return undefined;
             if (!out.trim()) return [];
             try {
-                const parsed = JSON.parse(out) as { ProcessId: number; Name: string; CommandLine: string | null } | { ProcessId: number; Name: string; CommandLine: string | null }[];
+                type Row = { ProcessId: number; Name: string; CommandLine: string | null; Started: number | null };
+                const parsed = JSON.parse(out) as Row | Row[];
                 const list = Array.isArray(parsed) ? parsed : [parsed];
-                return list.filter(p => p.CommandLine && commandLineNamesProject(p.CommandLine, uproject)).map(p => ({ pid: p.ProcessId, name: p.Name }));
+                return list
+                    .filter(p => p.CommandLine && commandLineNamesProject(p.CommandLine, uproject))
+                    .map(p => ({ pid: p.ProcessId, name: p.Name, ...(typeof p.Started === 'number' ? { startedAt: p.Started } : {}) }));
             } catch {
                 return undefined;
             }
         }
-        const out = await run('ps', ['-eo', 'pid=,args=']);
+        const out = await run('ps', ['-eo', 'pid=,etimes=,args=']);
         if (out === undefined) return undefined;
         const found: ProjectProcess[] = [];
+        const now = Date.now();
         for (const line of out.split('\n')) {
-            const m = /^\s*(\d+)\s+(.*)$/.exec(line);
+            const m = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
             if (!m) continue;
-            const exe = path.basename(m[2]!.split(/\s+/)[0] ?? '');
-            if (UNREAL.test(exe) && commandLineNamesProject(m[2]!, uproject)) found.push({ pid: Number(m[1]), name: exe });
+            const exe = path.basename(m[3]!.split(/\s+/)[0] ?? '');
+            if (UNREAL.test(exe) && commandLineNamesProject(m[3]!, uproject)) found.push({ pid: Number(m[1]), name: exe, startedAt: now - Number(m[2]) * 1000 });
         }
         return found;
     },
