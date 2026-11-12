@@ -245,7 +245,11 @@ export class CoreTools {
             case 'restart': {
                 const h = await this.engine.stop(ws, 'dream_engine restart');
                 const r = await this.start(ws, args, ctx);
-                return h ? { ...r, content: [{ type: 'text', text: `Stopped pid ${h.pid}.` }, ...r.content] } : r;
+                if (!h) return r;
+                const first = r.content[0];
+                const rest = first && first.type === 'text' ? first.text : '';
+                const sc = (r.structuredContent ?? {}) as Record<string, unknown>;
+                return textResult(`Stopped pid ${h.pid}.\n${rest}`, !!r.isError, { ...sc, stopped: h.pid });
             }
             case 'logs': {
                 const { lines, file, live } = this.engine.logs(ws);
