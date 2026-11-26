@@ -40,7 +40,8 @@ def find_uproject(explicit: str | os.PathLike[str] | None = None,
                   start_at: str | os.PathLike[str] | None = None) -> Path:
     """Walk up from the target first, then from the working directory.
 
-    Both roots are tried because a source file under `DFX/` sits inside the project, so
+    Both roots are tried because a source file under `DreamSource/FX/` (or a legacy `DFX/`)
+    sits inside the project, so
     starting at the file finds the right project even when the server was launched from
     somewhere else entirely.
     """

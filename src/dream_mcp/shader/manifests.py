@@ -1,10 +1,14 @@
 """Reading the DreamShader bridge manifests.
 
-`material-expressions.json`, `substrate-builtins.json` and `settings.json` are written at
-bridge startup and whenever the workspace is opened, and they survive the editor exiting.
-`bridge.db` carries the same data in queryable form but is **deleted on both startup and
-shutdown** and never read back by the plugin, so it is useless as a source of truth here.
-The JSON is the durable copy; read that.
+The material-expressions, substrate-builtins and settings manifests are written at bridge
+startup and whenever the workspace is opened, and they survive the editor exiting.
+
+Since the DreamSource layout they are `documents` rows of
+`Intermediate/DreamSource/shader.db` -- the same JSON text the files held, verbatim -- and the
+database persists across sessions. Before it they were `material-expressions.json`,
+`substrate-builtins.json` and `settings.json` in `Saved/DreamShader/Bridge`; that plugin's
+`bridge.db` was deleted at startup and shutdown and never served as a source of truth. The
+database is read when it exists, the legacy files otherwise.
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..core.liveness import shader_bridge_dir
+from ..core import shader_db
 from ..core.locate import Project
 
 
@@ -156,19 +160,36 @@ def _load_json(path: Path) -> dict | None:
         return None
 
 
+#: Each manifest's `documents` name in shader.db, and the file it used to be.
+_MANIFESTS = (("material-expressions", "material-expressions.json"),
+              ("substrate-builtins", "substrate-builtins.json"),
+              ("settings", "settings.json"))
+
+
 def load(project: Project) -> Manifests:
-    directory = shader_bridge_dir(project)
+    """The manifests, from shader.db when it exists, else from the legacy JSON files.
+
+    Raises `shader_db.SchemaMismatch` for a database of a schema this build does not read.
+    """
     missing: list[str] = []
+    loaded: dict[str, dict | None] = {}
 
-    expressions_data = _load_json(directory / "material-expressions.json")
-    builtins_data = _load_json(directory / "substrate-builtins.json")
-    settings_data = _load_json(directory / "settings.json")
+    if shader_db.has_database(project):
+        directory = shader_db.database_path(project)
+        for document, _ in _MANIFESTS:
+            loaded[document] = shader_db.read_document_json(project, document)
+            if loaded[document] is None:
+                missing.append(document)
+    else:
+        directory = shader_db.legacy_bridge_dir(project)
+        for document, file_name in _MANIFESTS:
+            loaded[document] = _load_json(directory / file_name)
+            if loaded[document] is None:
+                missing.append(file_name)
 
-    for name, data in (("material-expressions.json", expressions_data),
-                       ("substrate-builtins.json", builtins_data),
-                       ("settings.json", settings_data)):
-        if data is None:
-            missing.append(name)
+    expressions_data = loaded["material-expressions"]
+    builtins_data = loaded["substrate-builtins"]
+    settings_data = loaded["settings"]
 
     expressions = [
         Expression(

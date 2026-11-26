@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import liveness as live
+from . import shader_db
 from .diagnostics import Diagnostic, from_bridge
 from .locate import Project
 
@@ -160,8 +161,12 @@ def send(project: Project,
 # ---------------------------------------------------------------- DreamShader
 
 
+# The inferring transport below exists for pre-M3 plugin builds only, and those all predate
+# the DreamSource layout: they publish `diagnostics.json` in `Saved/DreamShader/Bridge`, never
+# shader.db. So these read that file and nothing else -- a shader.db left by a newer build
+# that was since rolled back would never move, and the wait would run out every time.
 def _shader_diagnostics_stamp(project: Project) -> str | None:
-    path = live.shader_bridge_dir(project) / "diagnostics.json"
+    path = shader_db.legacy_bridge_dir(project) / "diagnostics.json"
     try:
         return json.loads(path.read_text(encoding="utf-8")).get("updatedAtUtc")
     except (OSError, json.JSONDecodeError):
@@ -169,7 +174,7 @@ def _shader_diagnostics_stamp(project: Project) -> str | None:
 
 
 def _shader_diagnostics_for(project: Project, source_file: Path) -> list[Diagnostic]:
-    path = live.shader_bridge_dir(project) / "diagnostics.json"
+    path = shader_db.legacy_bridge_dir(project) / "diagnostics.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -224,7 +229,7 @@ def _send_shader_inferred(project: Project,
     What it does still buy is avoiding the double-write entirely -- the editor compiles in
     memory and no second process touches the packages.
     """
-    directory = live.shader_bridge_dir(project)
+    directory = shader_db.legacy_bridge_dir(project)
     requests = directory / "Requests"
     if not requests.exists():
         raise BridgeUnavailable("No DreamShader bridge request directory.")

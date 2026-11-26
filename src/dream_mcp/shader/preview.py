@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..core import shader_db
 from ..core.liveness import shader_bridge_dir
 from ..core.locate import Project
 from . import preview_ws
@@ -97,15 +98,27 @@ def render(project: Project,
 def _cache_frame(project: Project, source_file: Path, png: bytes) -> Path:
     """Put the bytes somewhere the MCP layer can hand back as an image.
 
-    Named after the source and written under the bridge's own Preview directory, so it sits
-    with the plugin's own renders and gets cleaned up the same way. One file per source, as
-    the plugin does -- a preview is a current view, not a history.
+    Named after the source and written under the plugin's own Preview directory
+    (`Intermediate/DreamSource/Shader/Preview`, or `Saved/DreamShader/Bridge/Preview` for a
+    plugin from before the DreamSource layout), so it sits with the plugin's own renders and
+    gets cleaned up the same way. One file per source, as the plugin does -- a preview is a
+    current view, not a history.
     """
-    directory = shader_bridge_dir(project) / "Preview"
+    directory = _preview_dir(project)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{source_file.stem}-mcp.png"
     path.write_bytes(png)
     return path
+
+
+def _on_legacy_layout(project: Project) -> bool:
+    return shader_bridge_dir(project) == shader_db.legacy_bridge_dir(project)
+
+
+def _preview_dir(project: Project) -> Path:
+    if _on_legacy_layout(project):
+        return shader_db.legacy_bridge_dir(project) / "Preview"
+    return shader_db.preview_dir(project)
 
 
 #: Blend modes whose output is a *contribution* to what is behind them rather than a
@@ -178,21 +191,34 @@ def _legibility_notes(source_file: Path) -> list[str]:
 def _read_preview_json(project: Project, request_id: str) -> dict:
     """Read the result, and refuse one that belongs to somebody else.
 
-    `preview.json` is a single file that every preview overwrites, whichever transport asked
-    for it -- the WebSocket panel and the VSCode extension write it too. Without checking the
-    echoed id, a preview racing another one hands back the wrong picture, which is the kind
-    of wrong answer that looks completely plausible.
+    The result is a single record that every preview overwrites, whichever transport asked
+    for it -- the WebSocket panel and the VSCode extension write it too: the `preview`
+    document of shader.db, or `preview.json` for a plugin from before the DreamSource layout.
+    Without checking the echoed id, a preview racing another one hands back the wrong
+    picture, which is the kind of wrong answer that looks completely plausible.
     """
-    path = shader_bridge_dir(project) / "preview.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise PreviewFailed(f"Could not read preview.json: {error}") from error
+    if _on_legacy_layout(project):
+        path = shader_db.legacy_bridge_dir(project) / "preview.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise PreviewFailed(f"Could not read the preview result: {error}") from error
+    else:
+        try:
+            data = shader_db.read_document_json(project, "preview")
+        except shader_db.SchemaMismatch as error:
+            raise PreviewFailed(f"Could not read the preview result: {error}") from error
+        if data is None:
+            raise PreviewFailed(
+                f"Could not read the preview result: no 'preview' document in "
+                f"{shader_db.database_path(project)}.")
+    if not isinstance(data, dict):
+        raise PreviewFailed("Could not read the preview result: it is not a JSON object.")
 
     echoed = str(data.get("requestId", ""))
     if request_id and echoed and echoed != request_id:
         raise PreviewFailed(
-            f"preview.json holds result '{echoed}', not '{request_id}' -- something else "
+            f"The preview result is '{echoed}', not '{request_id}' -- something else "
             f"rendered a preview at the same time. Retry."
         )
     return data

@@ -16,7 +16,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP, Image
 
 from .city import driver as city
-from .core import assets, cli, liveness as live, routing, transport
+from .core import assets, cli, fx_db, liveness as live, routing, shader_db, transport
 from .core.diagnostics import read_published, summarize
 from .core.locate import LocateError, Project, resolve
 from .fx import index as fx_index
@@ -90,27 +90,51 @@ def dream_status(project_dir: str | None = None) -> str:
         modules = sum(1 for m in index.modules if m.kind == "module")
         dynamic = sum(1 for m in index.modules if m.kind == "dynamicInput")
         lines.append(
-            f"  DFX index:  {len(index.modules)} entries "
+            f"  DreamFX index:  {len(index.modules)} entries "
             f"({modules} modules, {dynamic} dynamic inputs), "
-            f"generated {index.generated_utc}, {index.age_days:.0f}d old"
+            f"generated {index.generated_utc}, {index.age_days:.0f}d old ({index.path})"
         )
         for warning in index.freshness_warnings(project):
             lines.append(f"  ! {warning}")
-    except (FileNotFoundError, OSError, ValueError) as error:
-        lines.append(f"  DFX index:  unavailable -- {error}")
+        if not index.from_database:
+            lines.append(f"  ! Read from the legacy {index.path.name}. Update the DreamFX "
+                         f"plugin to move it into {fx_db.INDEX_DIRECTORY}/{fx_db.INDEX_DATABASE}.")
+    except (FileNotFoundError, OSError, ValueError, fx_db.SchemaMismatch) as error:
+        lines.append(f"  DreamFX index:  unavailable -- {error}")
+    fx_sources = fx_db.source_directory(project)
+    lines.append(f"  DreamFX sources: {fx_sources}")
+    if fx_db.uses_legacy_source_directory(project):
+        lines.append(f"  ! DFX/ is deprecated: migrate it to "
+                     f"{fx_db.configured_source_directory(project)} (the editor offers to) -- "
+                     f"Dream sources are managed together under DreamSource/.")
+    elif fx_db.legacy_source_path(project).is_dir():
+        lines.append(f"  ! DFX/ is ignored because {fx_sources} exists: merge it there, then "
+                     f"delete it.")
 
-    manifests = shader_manifests.load(project)
-    if manifests.missing:
-        lines.append(f"  DShader manifests: missing {', '.join(manifests.missing)} "
-                     f"-- open the editor once to write them")
+    try:
+        manifests = shader_manifests.load(project)
+    except shader_db.SchemaMismatch as error:
+        lines.append(f"  DreamShader manifests: unreadable -- {error}")
     else:
-        lines.append(
-            f"  DShader manifests: {len(manifests.expressions)} expressions, "
-            f"{len(manifests.builtins)} Substrate builtins, {len(manifests.aliases)} enum "
-            f"aliases, generated {manifests.generated_at}"
-        )
-    if not manifests.substrate_supported and manifests.substrate_unsupported_reason:
-        lines.append(f"  ! {manifests.substrate_unsupported_reason}")
+        if manifests.missing:
+            lines.append(f"  DreamShader manifests: missing {', '.join(manifests.missing)} "
+                         f"in {manifests.directory} -- open the editor once to write them")
+        else:
+            lines.append(
+                f"  DreamShader manifests: {len(manifests.expressions)} expressions, "
+                f"{len(manifests.builtins)} Substrate builtins, {len(manifests.aliases)} enum "
+                f"aliases, generated {manifests.generated_at} ({manifests.directory})"
+            )
+        if not manifests.substrate_supported and manifests.substrate_unsupported_reason:
+            lines.append(f"  ! {manifests.substrate_unsupported_reason}")
+        if manifests.directory == shader_db.legacy_bridge_dir(project):
+            lines.append("  ! Read from the legacy Saved/DreamShader/Bridge. Update the "
+                         "DreamShader plugin to move to Intermediate/DreamSource/shader.db.")
+    source_dir = shader_db.source_directory(project)
+    lines.append(f"  DreamShader sources: {source_dir}")
+    if source_dir == project.root / shader_db.LEGACY_SOURCE_DIRECTORY:
+        lines.append("  ! DShader/ is deprecated: migrate it to DreamSource/Shader (the editor "
+                     "offers to) -- Dream sources are managed together under DreamSource/.")
 
     lines.append("")
     for lang, label in (("fx", "DreamFX"), ("shader", "DreamShader")):
@@ -238,7 +262,7 @@ def dream_schema(name: str,
     if want in ("fx", "auto"):
         try:
             index = fx_index.load(project)
-        except (FileNotFoundError, OSError, ValueError) as error:
+        except (FileNotFoundError, OSError, ValueError, fx_db.SchemaMismatch) as error:
             if want == "fx":
                 return str(error)
             sections.append(f"[DreamFX index unavailable: {error}]")
@@ -262,7 +286,10 @@ def dream_schema(name: str,
                 return body
 
     if want in ("shader", "auto"):
-        manifests = shader_manifests.load(project)
+        try:
+            manifests = shader_manifests.load(project)
+        except shader_db.SchemaMismatch as error:
+            return f"DreamShader manifests cannot be read: {error}"
         if manifests.missing and want == "shader":
             return (f"DreamShader manifests are missing ({', '.join(manifests.missing)}). "
                     f"Open the project in the editor once -- the bridge writes them at "
@@ -308,12 +335,43 @@ def _resolve_target(project: Project, target: str) -> tuple[str, Path | None]:
     if target.strip().lower() in ("all", "-all", "*"):
         return "", None
 
-    path = Path(target)
-    if not path.is_absolute():
-        path = (project.root / path).resolve()
+    path = _resolve_source_path(project, target)
     if not path.exists():
         raise FileNotFoundError(f"No such source file: '{path}'.")
     return routing.language_for(str(path)) or "", path
+
+
+def _resolve_source_path(project: Project, target: str) -> Path:
+    """Absolute as given; relative against the project root, and for a DreamShader source
+    that is not there, against the project's shader source directory (DreamSource/Shader, or
+    the legacy DShader) -- the order the plugin's commandlet resolves `-Source` in.
+
+    A DreamFX source that is not there is looked up in the project's FX source directory
+    (DreamSource/FX, or the legacy DFX), with a leading `DFX/` or configured-directory prefix
+    dropped first -- the way DreamFX resolves `from "DFX/..."` -- so a path written before a
+    migration still finds the file after it."""
+    path = Path(target)
+    if path.is_absolute():
+        return path
+    candidate = (project.root / path).resolve()
+    if candidate.exists():
+        return candidate
+    lang = routing.language_for(target)
+    if lang == "shader":
+        in_sources = (shader_db.source_directory(project) / path).resolve()
+        if in_sources.exists():
+            return in_sources
+    elif lang == "fx":
+        relative = target.replace("\\", "/").removeprefix("./")
+        for prefix in (fx_db.configured_source_directory(project) + "/",
+                       fx_db.LEGACY_SOURCE_DIRECTORY + "/"):
+            if relative.lower().startswith(prefix.lower()):
+                relative = relative[len(prefix):]
+                break
+        in_sources = (fx_db.source_directory(project) / relative).resolve()
+        if in_sources.exists():
+            return in_sources
+    return candidate
 
 
 def _report(header: str, decision: routing.Decision, lines: list[str]) -> str:
@@ -499,7 +557,9 @@ def dream_build(target: str, lang: str = "auto", project_dir: str | None = None,
     Falls back to the CLI when no editor is running, and REFUSES when the editor is hung,
     because that is the one state where both paths are unsafe.
 
-    target: a source file (absolute, or relative to the project root), or "all".
+    target: a source file (absolute, relative to the project root, or relative to the
+            language's source directory -- DreamSource/FX or DreamSource/Shader, or the
+            legacy DFX / DShader), or "all".
             "all" through a live editor is QUEUED, not completed -- it returns immediately.
             A DreamCity city is its .dct or its package (@dreamcity/cities/Island).
     lang:   "auto" reads the extension (.dfs/.dfe/.dfm = fx, .dsm/.dsf = shader, .dct = city).
@@ -543,7 +603,8 @@ def dream_verify(target: str, lang: str = "auto", project_dir: str | None = None
 def dream_diagnostics(lang: str = "both", project_dir: str | None = None) -> str:
     """Show what the editor currently believes is wrong, without compiling anything.
 
-    Both bridges republish their findings to `diagnostics.json` after every run, so this
+    Both bridges republish their findings after every run (to `Intermediate/DreamSource/
+    fx.db` / `shader.db`, or `diagnostics.json` in an older plugin's bridge folder), so this
     reads the last result for free -- useful when someone else's compile produced the
     errors, when a response was already consumed, or just to see the standing state before
     deciding what to rebuild.
@@ -577,12 +638,16 @@ def dream_diagnostics(lang: str = "both", project_dir: str | None = None) -> str
         if which not in ("fx", "shader"):
             return f"lang must be \"fx\", \"shader\", \"both\" or \"city\", not '{lang}'."
 
-        found, stamp = read_published(project, which)
         label = "DreamFX" if which == "fx" else "DreamShader"
+        try:
+            found, stamp = read_published(project, which)
+        except (shader_db.SchemaMismatch, fx_db.SchemaMismatch) as error:
+            blocks.append(f"{label}: diagnostics cannot be read -- {error}")
+            continue
 
         if stamp is None:
-            blocks.append(f"{label}: no diagnostics.json -- the bridge has not run in this "
-                          f"project yet.")
+            blocks.append(f"{label}: no diagnostics published -- the bridge has not run in "
+                          f"this project yet.")
             continue
 
         head = f"{label}: {summarize(found)}, last written {stamp}"
@@ -638,9 +703,7 @@ def dream_preview(source_file: str,
     except LocateError as error:
         return [f"Could not locate the project: {error}"]
 
-    path = Path(source_file)
-    if not path.is_absolute():
-        path = (project.root / path).resolve()
+    path = _resolve_source_path(project, source_file)
     if not path.exists():
         return [f"No such source file: '{path}'."]
 

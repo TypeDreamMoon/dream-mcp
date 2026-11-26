@@ -38,7 +38,7 @@ def project() -> Project:
 @pytest.fixture(scope="module")
 def index(project: Project) -> fx_index.Index:
     if not fx_index.index_path(project).exists():
-        pytest.skip("no .dfx-index.json; run `dfx.ps1 index`")
+        pytest.skip("no .dreamfx/index.db or .dfx-index.json; run `dfx.ps1 index`")
     return fx_index.load(project)
 
 

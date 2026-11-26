@@ -68,6 +68,11 @@ are load-bearing and all three are implemented here:
   window to wait out.
 - A crash leaves the file behind. The recorded pid is what closes that gap.
 
+Both bridge folders moved with the DreamSource layout, to `Intermediate/DreamSource/FX/Bridge`
+and `Intermediate/DreamSource/Shader/Bridge`. The new folder is used when it has a
+`status.json`, else the legacy `Saved/DreamFX/Bridge` / `Saved/DreamShader/Bridge` when that
+has one, so an older plugin build keeps working.
+
 DreamShader liveness is the same fact since M3: the plugin publishes and deletes its own
 `status.json` on the same contract. The old `bridge.db` heuristic is still read, but only as
 a fallback for an editor running a pre-M3 build, and results from it are marked inferred.
@@ -91,7 +96,11 @@ probe input signatures, because probing walks the module graphs and
 unbounded recursion — 81 frames, then an uncatchable stack overflow that takes the editor
 down with everything unsaved in it. Signatures can only come from a process that is allowed
 to die and be restarted, which is `dfx.ps1 index` with its quarantine list. This reads what
-that run leaves behind.
+that run leaves behind: `<FX source dir>/.dreamfx/index.db` (modules in their original order,
+quarantine from its own table), or, for a plugin from before the DreamSource layout, the
+legacy `.dfx-index.json` and the `.quarantine` file beside it. The FX source dir is
+`DreamSource/FX` — or whatever `Config/DefaultDreamSource.ini` sets — and the deprecated `DFX/`
+only when that does not exist.
 
 Ambiguous names are refused with the full candidate list rather than resolved arbitrarily —
 `ConeMask` matches four different assets.
@@ -175,10 +184,13 @@ it would be dead code with a passing test, which reads as coverage forever.
 ### `dream_diagnostics`
 
 The editor's standing findings, from whichever plugin, without compiling anything. Both bridges
-republish to `diagnostics.json` after every run precisely so a client that did not make the request
-can still read the result. The two file shapes differ — DreamFX writes a flat array where each entry
-names its own file, DreamShader groups by file and puts the path on the group — and both land in one
-shape here.
+republish after every run precisely so a client that did not make the request can still read the
+result — into `Intermediate/DreamSource/fx.db` / `shader.db` since the DreamSource layout, into
+`diagnostics.json` in the bridge folder (`Saved/DreamFX/Bridge`, `Saved/DreamShader/Bridge`) before
+it; the database wins when both exist. The two shapes differ — DreamFX publishes a flat array where
+each entry names its own file, DreamShader groups by file and puts the path on the group — and both
+land in one shape here. A database stamped with a schema this build does not read is reported as
+such rather than guessed at.
 
 Reports the *last run*, not the current source. A file edited since is not represented.
 

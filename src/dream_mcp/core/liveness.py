@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
+from . import fx_db, shader_db
 from .locate import Project
 
 #: Bumped only when a change would make an older client misread a newer editor. Must match
@@ -76,12 +77,34 @@ class BridgeStatus:
         return self.liveness in (Liveness.ALIVE, Liveness.BUSY)
 
 
+def _pick_bridge_dir(current: Path, legacy: Path) -> Path:
+    """A live editor is wherever a `status.json` is -- new place first, so an upgraded plugin
+    wins over a stale old folder -- and with no editor running, whichever folder exists, new
+    place first (the legacy one when neither does, which is where an older plugin would
+    put it)."""
+    if (current / "status.json").exists():
+        return current
+    if (legacy / "status.json").exists():
+        return legacy
+    if current.is_dir():
+        return current
+    return legacy
+
+
 def fx_bridge_dir(project: Project) -> Path:
-    return project.saved / "DreamFX/Bridge"
+    """Where the DreamFX editor reads requests and publishes `status.json`:
+    `Intermediate/DreamSource/FX/Bridge` since the DreamSource layout, `Saved/DreamFX/Bridge`
+    before it. See `_pick_bridge_dir` for which one wins."""
+    return _pick_bridge_dir(fx_db.bridge_dir(project), fx_db.legacy_bridge_dir(project))
 
 
 def shader_bridge_dir(project: Project) -> Path:
-    return project.saved / "DreamShader/Bridge"
+    """Where the DreamShader editor reads requests and publishes `status.json`.
+
+    `Intermediate/DreamSource/Shader/Bridge` since the DreamSource layout, `Saved/DreamShader/
+    Bridge` before it. See `_pick_bridge_dir` for which one wins.
+    """
+    return _pick_bridge_dir(shader_db.bridge_dir(project), shader_db.legacy_bridge_dir(project))
 
 
 def _process_exists(pid: int) -> bool | None:
@@ -266,13 +289,19 @@ def read_shader_status(project: Project) -> BridgeStatus:
 
     An editor running a pre-M3 DreamShader publishes no status file, and reporting that as
     DEAD would send a compile to the CLI while an editor is open. `bridge.db` is the signal
-    that was available before: the plugin deletes it at both startup and shutdown and holds
+    that was available before: those builds delete it at both startup and shutdown and hold
     it open in between, so its presence tracks a running editor. It is a weaker claim -- a
     hard crash leaves the file behind and there is no pid to check it against -- so that
     path is marked, and callers route it to the inferring transport rather than the real
     request/response one.
+
+    That inference applies to the legacy `Saved/DreamShader/Bridge` folder only. A plugin on
+    the DreamSource layout keeps `Intermediate/DreamSource/shader.db` across sessions -- it is
+    never deleted -- so its presence says nothing about an editor; there, no `status.json`
+    means DEAD.
     """
     directory = shader_bridge_dir(project)
+    legacy = directory == shader_db.legacy_bridge_dir(project)
     if not directory.exists():
         return BridgeStatus(
             Liveness.UNKNOWN,
@@ -299,7 +328,7 @@ def read_shader_status(project: Project) -> BridgeStatus:
             status.owner_pid = owner
         return status
 
-    if (directory / "bridge.db").exists():
+    if legacy and (directory / "bridge.db").exists():
         generated_at = None
         manifest = directory / "material-expressions.json"
         if manifest.exists():
@@ -319,5 +348,5 @@ def read_shader_status(project: Project) -> BridgeStatus:
 
     return BridgeStatus(
         Liveness.DEAD,
-        "No status.json and no bridge.db. The editor is not running.",
+        "No status.json. The editor is not running.",
     )

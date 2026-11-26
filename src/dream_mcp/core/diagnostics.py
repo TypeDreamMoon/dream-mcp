@@ -102,27 +102,30 @@ def from_cli(output: str) -> list[Diagnostic]:
 
 
 def read_published(project, lang: str) -> tuple[list[Diagnostic], str | None]:
-    """Read whichever plugin's published `diagnostics.json`, normalised.
+    """Read whichever plugin's published diagnostics, normalised.
 
-    Both bridges write one, and both rewrite it on every run precisely so a client that was
-    not the one who asked -- or one that reconnected after a response was consumed -- can
-    still see what the last run found. The two files have different shapes: DreamFX writes a
-    flat array where each entry names its own file, DreamShader groups by file and puts the
-    path on the group. Same destination shape either way.
+    Both bridges republish on every run precisely so a client that was not the one who
+    asked -- or one that reconnected after a response was consumed -- can still see what the
+    last run found. DreamFX publishes a flat array where each entry names its own file.
+    DreamShader groups by file and puts the path on the group. Since the DreamSource layout
+    both live in a database -- the `diagnostics` table of `Intermediate/DreamSource/fx.db` /
+    `shader.db`, rebuilt here into the envelope the old file had -- and before it in
+    `diagnostics.json` in the bridge folder. Same destination shape either way.
+
+    A database of a schema this build does not know raises `fx_db.SchemaMismatch` /
+    `shader_db.SchemaMismatch`.
     """
-    from . import liveness as live  # local: liveness imports locate, never this module
-
-    directory = (live.fx_bridge_dir(project) if lang == "fx"
-                 else live.shader_bridge_dir(project))
-    path = directory / "diagnostics.json"
-
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return [], None
-
     if lang == "fx":
-        return from_bridge(data.get("diagnostics", [])), data.get("generatedUtc")
+        from . import fx_db
+
+        data = fx_db.read_published_diagnostics(project)
+        if data is None:
+            return [], None
+        return from_bridge(data.get("diagnostics") or []), data.get("generatedUtc")
+
+    data = read_shader_envelope(project)
+    if data is None:
+        return [], None
 
     found: list[Diagnostic] = []
     for entry in data.get("files", []):
@@ -173,3 +176,24 @@ def summarize(diagnostics: list[Diagnostic]) -> str:
     if info:
         parts.append(f"{info} info")
     return ", ".join(parts)
+
+
+def read_shader_envelope(project) -> dict | None:
+    """DreamShader's published diagnostics as the `diagnostics.json` envelope
+    (`{version, updatedAtUtc, files}`): from `shader.db` when there is one, else from the
+    legacy file in the bridge folder. None when neither can be read.
+
+    A database of a schema this build does not know raises `shader_db.SchemaMismatch` rather
+    than falling back: the legacy file beside it, if any, is older than the database.
+    """
+    from . import shader_db
+
+    if shader_db.has_database(project):
+        data = shader_db.read_diagnostics(project)
+        if data is not None:
+            return data
+    try:
+        return json.loads((shader_db.legacy_bridge_dir(project) / "diagnostics.json")
+                          .read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None

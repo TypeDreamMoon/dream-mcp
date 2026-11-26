@@ -1,4 +1,10 @@
-"""Reading `DFX/.dfx-index.json` -- the whole Niagara module library, with input signatures.
+"""Reading the DreamFX module index -- the whole Niagara module library, with input signatures.
+
+Since the DreamSource layout it lives in `<FX source dir>/.dreamfx/index.db` (modules,
+quarantine and probe journal in one SQLite database, see `core.fx_db`); before it, in
+`<FX source dir>/.dfx-index.json` with a `.quarantine` file beside it. The FX source dir is
+`DreamSource/FX` (or whatever `Config/DefaultDreamSource.ini` says), or the legacy `DFX/`.
+`load` prefers the database and falls back to the JSON file, so either plugin build works.
 
 This never touches the editor or the bridge, and that is deliberate rather than an
 optimisation. The bridge's own `refreshIndex` action **refuses** to probe input signatures,
@@ -8,7 +14,7 @@ uncatchable stack overflow that takes the editor down along with anything unsave
 
 Signatures can therefore only be produced by a process that is allowed to die and be
 restarted, which is `dfx.ps1 index` with its quarantine list. What that run leaves behind is
-this file, and reading it is free.
+that index, and reading it is free.
 """
 
 from __future__ import annotations
@@ -18,7 +24,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..core import fx_db
 from ..core.locate import Project
+
+#: Raised by `load` for an index.db of a schema this build does not read.
+SchemaMismatch = fx_db.SchemaMismatch
 
 #: Past this the index is old enough to mention unprompted. Not an error -- the library only
 #: changes when the engine or a content pack does, and both are rare.
@@ -85,6 +95,10 @@ class Index:
     search_paths: list[str]
     modules: list[Module]
     quarantined: list[str]
+    updated_utc: str | None = None
+    """When the modules were last written, for an index read from index.db. Its file's
+    mtime moves with every quarantine write, so it cannot stand in for this the way the
+    JSON file's mtime does."""
 
     _by_normalized: dict[str, list[Module]] = field(default_factory=dict, repr=False)
 
@@ -92,11 +106,17 @@ class Index:
         for module in self.modules:
             self._by_normalized.setdefault(normalize(module.name), []).append(module)
 
+    @property
+    def from_database(self) -> bool:
+        return self.path.suffix == ".db"
+
     # -- freshness ---------------------------------------------------------------
 
     @property
     def age_days(self) -> float:
-        stamp = datetime.fromtimestamp(self.path.stat().st_mtime, tz=timezone.utc)
+        stamp = _parse_utc(self.updated_utc) if self.from_database else None
+        if stamp is None:
+            stamp = datetime.fromtimestamp(self.path.stat().st_mtime, tz=timezone.utc)
         return (datetime.now(timezone.utc) - stamp).total_seconds() / 86400.0
 
     def freshness_warnings(self, project: Project,
@@ -193,26 +213,63 @@ class Index:
         return hits[:limit]
 
 
+def _parse_utc(iso: str | None) -> datetime | None:
+    if not iso:
+        return None
+    try:
+        stamp = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+
+
 def index_path(project: Project) -> Path:
-    return project.root / "DFX/.dfx-index.json"
+    """Where the index is read from: `<FX source dir>/.dreamfx/index.db` when it exists, else
+    the legacy `<FX source dir>/.dfx-index.json` when that exists, else where index.db would
+    be. (`load` also falls back to the JSON file when index.db holds no modules yet.)"""
+    source = fx_db.source_directory(project)
+    database = fx_db.index_database_path(source)
+    legacy = fx_db.legacy_index_path(source)
+    if not database.is_file() and legacy.is_file():
+        return legacy
+    return database
 
 
 def load(project: Project) -> Index:
-    path = index_path(project)
-    if not path.exists():
+    """The module index: index.db when it holds modules, else the legacy `.dfx-index.json`.
+
+    Raises FileNotFoundError when there is neither, and SchemaMismatch for an index.db of a
+    schema this build does not read -- not a fallback to the JSON file, which the plugin
+    deletes once it has imported it.
+    """
+    source = fx_db.source_directory(project)
+    database = fx_db.index_database_path(source)
+    legacy = fx_db.legacy_index_path(source)
+
+    from_db = fx_db.read_index(database)
+    if from_db is not None and from_db[0]["modules"]:
+        data, quarantined, meta = from_db
+        return _build(database, data, quarantined,
+                      meta.get("modules_updated_utc") or data.get("generatedUtc"))
+
+    if not legacy.is_file():
+        state = ("exists but holds no modules yet" if from_db is not None
+                 else "does not exist")
         raise FileNotFoundError(
-            f"No module index at '{path}'. Build one with `dfx.ps1 index` -- it takes a few "
+            f"No module index in '{source}': '{database}' {state}, and there is no legacy "
+            f"'{legacy.name}' beside it. Build one with `dfx.ps1 index` -- it takes a few "
             f"minutes and only needs redoing when the engine or the module library changes."
         )
 
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = json.loads(legacy.read_text(encoding="utf-8"))
+    quarantined = fx_db.read_legacy_quarantine(legacy)
+    if from_db is not None:
+        # A database that recorded quarantine but no modules yet: those crashes count too.
+        quarantined += [q for q in from_db[1] if q not in quarantined]
+    return _build(legacy, data, quarantined, None)
 
-    quarantine = path.with_suffix(path.suffix + ".quarantine")
-    quarantined: list[str] = []
-    if quarantine.exists():
-        quarantined = [line.strip() for line in
-                       quarantine.read_text(encoding="utf-8").splitlines() if line.strip()]
 
+def _build(path: Path, data: dict, quarantined: list[str], updated_utc: str | None) -> Index:
     modules = [
         Module(
             name=entry["name"],
@@ -234,7 +291,8 @@ def load(project: Project) -> Index:
         generated_utc=data.get("generatedUtc"),
         project=data.get("project"),
         engine=data.get("engine"),
-        search_paths=data.get("searchPaths", []),
+        search_paths=data.get("searchPaths") or [],
         modules=modules,
         quarantined=quarantined,
+        updated_utc=updated_utc,
     )
